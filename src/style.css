@@ -1,296 +1,394 @@
-:root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+/* ═══════════════════════════════════════════════════════════
+   Flight Simulator — Premium UI Styles
+   ═══════════════════════════════════════════════════════════ */
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+/* ─── Reset & Base ─────────────────────────────────────── */
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
+*, *::before, *::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-}
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
-}
-
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
-  margin-bottom: 24px;
-
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-}
-
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
-    position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#app {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-}
-
-#center {
-  display: flex;
-  flex-direction: column;
-  gap: 25px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
-
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
-  }
-}
-
-#next-steps {
-  display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
-
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
-
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
-
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
-  }
-}
-
-#docs {
-  border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-}
-
-#next-steps ul {
-  list-style: none;
   padding: 0;
+  overflow: hidden;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: #000;
+  color: #f8fafc;
+}
+
+/* ─── Cesium Container ─────────────────────────────────── */
+
+#cesiumContainer {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Hide Cesium branding */
+.cesium-viewer-bottom,
+.cesium-viewer-toolbar {
+  display: none !important;
+}
+
+/* Style the timeline & animation widgets if visible */
+.cesium-viewer-animationContainer,
+.cesium-viewer-timelineContainer {
+  opacity: 0.7;
+}
+
+/* ─── UI Panel ─────────────────────────────────────────── */
+
+#uiPanel {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  background: rgba(10, 15, 30, 0.82);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 24px;
+  border-radius: 20px;
+  width: 340px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+/* ─── Panel Header ─────────────────────────────────────── */
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-header h1 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #f8fafc, #94a3b8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: white;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+/* ─── Input Groups ─────────────────────────────────────── */
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-group label {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.label-icon {
+  font-size: 0.9rem;
+}
+
+/* ─── Select Dropdowns ─────────────────────────────────── */
+
+#departureSelect,
+#destinationSelect {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 11px 14px;
+  border-radius: 10px;
+  color: #f1f5f9;
+  font-size: 0.85rem;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  transition: all 0.2s ease;
+}
+
+#departureSelect:hover,
+#destinationSelect:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+#departureSelect:focus,
+#destinationSelect:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+#departureSelect:disabled,
+#destinationSelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#departureSelect option,
+#destinationSelect option {
+  background: #1e293b;
+  color: #f1f5f9;
+  padding: 8px;
+}
+
+/* ─── Swap Button ──────────────────────────────────────── */
+
+#swapButton {
+  align-self: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: -6px 0;
+}
+
+#swapButton:hover {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #60a5fa;
+  transform: rotate(180deg);
+}
+
+/* ─── Flight Info Bar ──────────────────────────────────── */
+
+#flightInfoBar {
   display: flex;
   gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
 }
 
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
+.info-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
-.ticks {
-  position: relative;
+.info-label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #64748b;
+}
+
+.info-value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+/* ─── Fly Button ───────────────────────────────────────── */
+
+#flyButton {
   width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: 12px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+  color: white;
+  letter-spacing: 0.02em;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
 
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
+  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #8b5cf6 100%);
+  background-size: 200% 200%;
+  animation: gradientShift 3s ease infinite;
 
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
+  box-shadow:
+    0 4px 15px rgba(59, 130, 246, 0.3),
+    0 0 40px rgba(99, 102, 241, 0.1);
+}
+
+@keyframes gradientShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+#flyButton:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 25px rgba(59, 130, 246, 0.4),
+    0 0 60px rgba(99, 102, 241, 0.15);
+}
+
+#flyButton:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+#flyButton:disabled {
+  background: rgba(255, 255, 255, 0.06);
+  color: #64748b;
+  cursor: not-allowed;
+  box-shadow: none;
+  animation: none;
+}
+
+/* ─── Cancel Button ────────────────────────────────────── */
+
+#cancelButton {
+  display: none;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+#cancelButton:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fecaca;
+}
+
+/* ─── Speed Controls ───────────────────────────────────── */
+
+#speedControls {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+.speed-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #64748b;
+  margin-right: 4px;
+}
+
+.speed-btn {
+  flex: 1;
+  padding: 7px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #94a3b8;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.speed-btn:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.speed-btn.active {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+/* ─── Phase Indicator ──────────────────────────────────── */
+
+#phaseIndicator {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+
+#phaseDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #94a3b8;
+  flex-shrink: 0;
+  animation: dotPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+#phaseText {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.phase-pulse {
+  animation: phaseBounce 0.4s ease;
+}
+
+@keyframes phaseBounce {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+/* ─── Responsive ───────────────────────────────────────── */
+
+@media (max-width: 480px) {
+  #uiPanel {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    padding: 18px;
   }
 }

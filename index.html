@@ -1,13 +1,87 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>symulator-cesium</title>
+    <meta name="description" content="3D flight simulator powered by CesiumJS — select airports and watch realistic takeoff, cruise, and landing on a 3D globe." />
+    <title>Flight Simulator — CesiumJS</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="app"></div>
+    <!-- Cesium 3D Globe -->
+    <div id="cesiumContainer"></div>
+
+    <!-- ─── UI Panel ───────────────────────────────────── -->
+    <div id="uiPanel">
+      <div class="panel-header">
+        <h1>✈️ Flight Simulator</h1>
+        <span class="badge">CesiumJS</span>
+      </div>
+
+      <!-- Departure -->
+      <div class="input-group">
+        <label for="departureSelect">
+          <span class="label-icon">🛫</span> Departure
+        </label>
+        <select id="departureSelect"></select>
+      </div>
+
+      <!-- Swap Button -->
+      <button id="swapButton" type="button" title="Swap airports" onclick="
+        const d = document.getElementById('departureSelect');
+        const a = document.getElementById('destinationSelect');
+        const tmp = d.value; d.value = a.value; a.value = tmp;
+        d.dispatchEvent(new Event('change'));
+      ">⇅</button>
+
+      <!-- Destination -->
+      <div class="input-group">
+        <label for="destinationSelect">
+          <span class="label-icon">🛬</span> Destination
+        </label>
+        <select id="destinationSelect"></select>
+      </div>
+
+      <!-- Flight Info Bar -->
+      <div id="flightInfoBar">
+        <div class="info-item">
+          <span class="info-label">Route</span>
+          <span class="info-value" id="infoRoute">GDN → NRT</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Distance</span>
+          <span class="info-value" id="infoDistance">—</span>
+        </div>
+        <div class="info-item">
+          <span class="info-label">Sim Time</span>
+          <span class="info-value" id="infoDuration">—</span>
+        </div>
+      </div>
+
+      <!-- Fly Button -->
+      <button id="flyButton" type="button">✈️ Start Flight</button>
+
+      <!-- Cancel Button (hidden by default) -->
+      <button id="cancelButton" type="button">✕ Cancel Flight</button>
+
+      <!-- Speed Controls (hidden by default) -->
+      <div id="speedControls">
+        <span class="speed-label">Speed:</span>
+        <button class="speed-btn active" data-speed="1">1×</button>
+        <button class="speed-btn" data-speed="2">2×</button>
+        <button class="speed-btn" data-speed="4">4×</button>
+        <button class="speed-btn" data-speed="8">8×</button>
+        <button class="speed-btn" data-speed="16">16×</button>
+      </div>
+
+      <!-- Phase Indicator (hidden by default) -->
+      <div id="phaseIndicator">
+        <span id="phaseDot"></span>
+        <span id="phaseText">Pre-flight</span>
+      </div>
+    </div>
+
+    <!-- ─── App Entry Point ────────────────────────────── -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
