@@ -187,11 +187,18 @@ export function createFlight(
   const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * climbDistanceDegrees;
   const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * climbDistanceDegrees;
 
-  const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
-  const destCartographic = Cesium.Cartographic.fromDegrees(destination.lon, destination.lat);
-  const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, destCartographic);
-
   const destHeadingRad = Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
+  
+  // Increase approach distance (0.25 degrees is approx 27 km) for a shallower slope
+  const approachDistanceDegrees = 0.25; 
+  const approachEntryLon = destination.lon + Math.sin(destHeadingRad) * approachDistanceDegrees;
+  const approachEntryLat = destination.lat + Math.cos(destHeadingRad) * approachDistanceDegrees;
+
+  const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
+  const approachEntryCartographic = Cesium.Cartographic.fromDegrees(approachEntryLon, approachEntryLat);
+  
+  // Great circle now connects the climb exit directly to the extended approach entry point
+  const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, approachEntryCartographic);
 
   // ═══════════════════════════════════════════════════════
   // SAMPLE GENERATION
@@ -230,7 +237,7 @@ export function createFlight(
     const frac = i / cruiseSamples;
     const elapsed = t_climbEnd + frac * timing.cruise;
 
-    const gcFrac = lerp(0.0, 0.90, frac); 
+    const gcFrac = lerp(0.0, 0.80, frac); // Cover 0% to 80% of the route
     const interp = geodesic.interpolateUsingFraction(gcFrac);
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
@@ -248,11 +255,14 @@ export function createFlight(
   for (let i = 0; i <= descentSamples; i++) {
     const frac = i / descentSamples;
     const elapsed = t_cruiseEnd + frac * timing.descent;
-    const gcFrac = lerp(0.90, 1.0, easeInOutCubic(frac));
+    
+    // Finish the remaining 20% of the great circle route
+    const gcFrac = lerp(0.80, 1.0, frac);
     const interp = geodesic.interpolateUsingFraction(gcFrac);
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
     const alt = lerp(CRUISE_ALTITUDE, APPROACH_ENTRY_ALT, easeInOutCubic(frac));
+    
     addSample(elapsed, lon, lat, alt);
   }
 
@@ -261,16 +271,12 @@ export function createFlight(
   for (let i = 0; i <= landingSamples; i++) {
     const frac = i / landingSamples;
     const elapsed = t_descentEnd + frac * timing.landing;
-    // Approach aligned with destination runway
-    const approachDist = (1 - frac) * 0.02;
-    const lon = destination.lon + Math.sin(destHeadingRad) * approachDist;
-    const lat = destination.lat + Math.cos(destHeadingRad) * approachDist;
-    let alt: number;
-    if (frac < 0.7) {
-      alt = lerp(APPROACH_ENTRY_ALT, destination.elevation, easeOutQuad(frac / 0.7));
-    } else {
-      alt = destination.elevation;
-    }
+    
+    // Linear horizontal transition, but vertical profile follows a parabolic easeOutQuad curve
+    const lon = lerp(approachEntryLon, destination.lon, frac);
+    const lat = lerp(approachEntryLat, destination.lat, frac);
+    const alt = lerp(APPROACH_ENTRY_ALT, destination.elevation, easeOutQuad(frac));
+    
     addSample(elapsed, lon, lat, alt);
   }
 

@@ -163,12 +163,14 @@ function startFlight(): void {
   });
 
   // Camera setup: route-based or simple
-  if (currentFlight.departureCamera) {
-    startDepartureChoreography(currentFlight);
-  } else {
-    // Simple: immediately track the entity
-    viewer.trackedEntity = currentFlight.entity;
-  }
+  //if (currentFlight.departureCamera) {
+  //  startDepartureChoreography(currentFlight);
+  //} else {
+  //  // Simple: immediately track the entity
+  //  viewer.trackedEntity = currentFlight.entity;
+  //}
+
+  viewer.trackedEntity = currentFlight.entity;
 
   // UI state: flying
   flyButton.style.display = "none";
