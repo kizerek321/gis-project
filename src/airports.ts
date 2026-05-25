@@ -1,5 +1,5 @@
 /**
- * Airport database — ~30 major world airports with coordinates,
+ * Airport database — 5 major world airports with coordinates,
  * elevations, and primary runway headings for realistic takeoff/landing.
  */
 
@@ -108,60 +108,65 @@ export const DEPARTURE_ROUTES: Record<string, DepartureRoute> = {
     ],
     liftoffPoint:     { lat: 52.149808, lon: 20.980909 },
   },
-  // TO DOs
-  NRT: {
-    gate:             { lat: 54.382008, lon: 18.461487 },
+  NRT: { 
+    gate:             { lat: 35.760170, lon: 140.385191 },
     gateHoldTime:     10,
     taxiWaypoints: [
-      { lat: 54.380842, lon: 18.460441 },
-      { lat: 54.381409, lon: 18.457662 },
-      { lat: 54.381367, lon: 18.456940 },
-      { lat: 54.381115, lon: 18.456327 },
+      { lat: 35.760439, lon: 140.383330 },
+      { lat: 35.760223, lon: 140.382045 },
+      { lat: 35.759217, lon: 140.381007 },
+      { lat: 35.758333, lon: 140.381124 },
+      { lat: 35.757096, lon: 140.381465 }
     ],
-    runwayThreshold:  { lat: 54.380190, lon: 18.455677 },
+    runwayThreshold:  { lat: 35.756455, lon: 140.381272 },
     runwayHoldTime:   3,
     runwayWaypoints: [
-      { lat: 54.379770, lon: 18.457211 },
-      { lat: 54.377248, lon: 18.467441 },
-      { lat: 54.375650, lon: 18.474154 },
+      { lat: 35.755394, lon: 140.381974 },
+      { lat: 35.753990, lon: 140.382993 },
+      { lat: 35.751962, lon: 140.384492 },
     ],
-    liftoffPoint:     { lat: 54.372255, lon: 18.487398 },
+    liftoffPoint:     { lat: 35.750129, lon: 140.385833 },
   },
   JFK: {
-    gate:             { lat: 54.382008, lon: 18.461487 },
+    gate:             { lat: 40.636710, lon: -73.780462 },
     gateHoldTime:     10,
     taxiWaypoints: [
-      { lat: 54.380842, lon: 18.460441 },
-      { lat: 54.381409, lon: 18.457662 },
-      { lat: 54.381367, lon: 18.456940 },
-      { lat: 54.381115, lon: 18.456327 },
+      { lat: 40.635878, lon: -73.778524 },
+      { lat: 40.635053, lon: -73.777106 },
+      { lat: 40.633375, lon: -73.778387 },
+      { lat: 40.632725, lon: -73.777323 },
+      { lat: 40.631554, lon: -73.774769 },
+      { lat: 40.629418, lon: -73.770006 },
+      { lat: 40.629356, lon: -73.768707 },
+      { lat: 40.630329, lon: -73.766623 }
     ],
-    runwayThreshold:  { lat: 54.380190, lon: 18.455677 },
+    runwayThreshold:  { lat: 40.632042, lon: -73.765196 },
     runwayHoldTime:   3,
     runwayWaypoints: [
-      { lat: 54.379770, lon: 18.457211 },
-      { lat: 54.377248, lon: 18.467441 },
-      { lat: 54.375650, lon: 18.474154 },
+      { lat: 40.630487, lon: -73.766430 },
+      { lat: 40.627865, lon: -73.768505 },
+      { lat: 40.626025, lon: -73.769896 }
     ],
-    liftoffPoint:     { lat: 54.372255, lon: 18.487398 },
+    liftoffPoint:     { lat: 40.624592, lon: -73.771044 },
   },
   SYD: {
-    gate:             { lat: 54.382008, lon: 18.461487 },
+    gate:             { lat: -33.936766, lon: 151.178867 },
     gateHoldTime:     10,
     taxiWaypoints: [
-      { lat: 54.380842, lon: 18.460441 },
-      { lat: 54.381409, lon: 18.457662 },
-      { lat: 54.381367, lon: 18.456940 },
-      { lat: 54.381115, lon: 18.456327 },
+      { lat: -33.936701, lon: 151.177335 },
+      { lat: -33.936574, lon: 151.175487 }
     ],
-    runwayThreshold:  { lat: 54.380190, lon: 18.455677 },
+    runwayThreshold:  { lat: -33.936878, lon: 151.175557 },
     runwayHoldTime:   3,
     runwayWaypoints: [
-      { lat: 54.379770, lon: 18.457211 },
-      { lat: 54.377248, lon: 18.467441 },
-      { lat: 54.375650, lon: 18.474154 },
+      { lat: -33.938854, lon: 151.176035 },
+      { lat: -33.940734, lon: 151.176550 },
+      { lat: -33.943511, lon: 151.177400 },
+      { lat: -33.945256, lon: 151.177943 },
+      { lat: -33.947001, lon: 151.178403 },
+      { lat: -33.951170, lon: 151.179447 },
     ],
-    liftoffPoint:     { lat: 54.372255, lon: 18.487398 },
+    liftoffPoint:     { lat: -33.951981, lon: 151.179671 },
   },
 };
 

@@ -63,9 +63,9 @@ async function setupTerrain(): Promise<void> {
       requestWaterMask: true,
     });
     viewer.terrainProvider = terrainProvider;
-    console.log("✅ Cesium World Terrain loaded");
+    console.log("Cesium World Terrain loaded");
   } catch (err) {
-    console.warn("⚠️ Terrain loading failed, using default:", err);
+    console.warn("Terrain loading failed, using default:", err);
   }
 }
 
