@@ -35,6 +35,7 @@ const phaseDot = document.getElementById("phaseDot") as HTMLSpanElement;
 const phaseText = document.getElementById("phaseText") as HTMLSpanElement;
 const speedControls = document.getElementById("speedControls") as HTMLDivElement;
 const cancelButton = document.getElementById("cancelButton") as HTMLButtonElement;
+const infoSpeed = document.getElementById("infoSpeed") as HTMLSpanElement;
 
 // ─── Initialize ─────────────────────────────────────────────
 
@@ -143,6 +144,23 @@ function startFlight(): void {
   // Start clock
   viewer.clock.shouldAnimate = true;
   viewer.clock.multiplier = 1.0;
+  viewer.clock.onTick.addEventListener((clock) => {
+  if (!currentFlight || !currentFlight.entity.position) return;
+
+  const currentTime = clock.currentTime;
+  const nextTime = Cesium.JulianDate.addSeconds(currentTime, 1, new Cesium.JulianDate());
+
+  const pos1 = currentFlight.entity.position.getValue(currentTime);
+  const pos2 = currentFlight.entity.position.getValue(nextTime);
+
+  if (pos1 && pos2) {
+    const distanceMeters = Cesium.Cartesian3.distance(pos1, pos2);
+    // Przeliczenie m/s na km/h
+    infoSpeed.textContent = `${Math.round(distanceMeters * 3.6)} km/h`;
+  } else {
+    infoSpeed.textContent = "0 km/h";
+  }
+  });
 
   // Camera setup: route-based or simple
   if (currentFlight.departureCamera) {

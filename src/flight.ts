@@ -147,8 +147,9 @@ export function createFlight(
   // Build sampled position
   const position = new Cesium.SampledPositionProperty();
   position.setInterpolationOptions({
-    interpolationDegree: 3,
-    interpolationAlgorithm: Cesium.HermitePolynomialApproximation,
+    interpolationDegree: 1,
+    interpolationAlgorithm: Cesium.LinearApproximation,
+    //HermitePolynomialApproximation
   });
 
   const elev = departure.elevation;
@@ -166,20 +167,29 @@ export function createFlight(
   // ── Determine liftoff position & great circle ──────────
   let liftoffLat: number;
   let liftoffLon: number;
+  let runwayHeadingRad: number;
 
   if (departureRoute) {
     liftoffLat = departureRoute.liftoffPoint.lat;
     liftoffLon = departureRoute.liftoffPoint.lon;
+    const prevPoint = departureRoute.runwayWaypoints[departureRoute.runwayWaypoints.length - 1] ?? departureRoute.runwayThreshold;
+    runwayHeadingRad = computeBearingRad(prevPoint, departureRoute.liftoffPoint);
   } else {
     // Generic: a point slightly ahead along runway heading
-    const hdgRad = Cesium.Math.toRadians(departure.runwayHeading);
-    liftoffLon = departure.lon + Math.sin(hdgRad) * 0.02;
-    liftoffLat = departure.lat + Math.cos(hdgRad) * 0.02;
+    runwayHeadingRad = Cesium.Math.toRadians(departure.runwayHeading);
+    liftoffLon = departure.lon + Math.sin(runwayHeadingRad) * 0.02;
+    liftoffLat = departure.lat + Math.cos(runwayHeadingRad) * 0.02;
   }
 
-  const liftoffCartographic = Cesium.Cartographic.fromDegrees(liftoffLon, liftoffLat);
+  //(0.1 ~ 11 km)
+  const climbDistanceDegrees = 0.1; 
+  
+  const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * climbDistanceDegrees;
+  const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * climbDistanceDegrees;
+
+  const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
   const destCartographic = Cesium.Cartographic.fromDegrees(destination.lon, destination.lat);
-  const geodesic = new Cesium.EllipsoidGeodesic(liftoffCartographic, destCartographic);
+  const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, destCartographic);
 
   const destHeadingRad = Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
 
@@ -201,35 +211,40 @@ export function createFlight(
   }
 
   // ─── CLIMB (liftoff → cruise altitude) ────────────────
-  const climbSamples = 20;
+  const climbSamples = 100;
   for (let i = 0; i <= climbSamples; i++) {
     const frac = i / climbSamples;
     const elapsed = t_takeoffEnd + frac * timing.climb;
-    // Move along first 10% of the great circle during climb
-    const gcFrac = easeInOutCubic(frac) * 0.10;
-    const interp = geodesic.interpolateUsingFraction(gcFrac);
-    const lon = Cesium.Math.toDegrees(interp.longitude);
-    const lat = Cesium.Math.toDegrees(interp.latitude);
-    const alt = lerp(CLIMB_EXIT_ALT, CRUISE_ALTITUDE, easeInOutCubic(frac));
+
+    //linear
+    const lon = lerp(liftoffLon, climbExitLon, frac);
+    const lat = lerp(liftoffLat, climbExitLat, frac);
+    const alt = lerp(elev + 50, CLIMB_EXIT_ALT, frac);
+    
     addSample(elapsed, lon, lat, alt);
   }
 
   // ─── CRUISE (great circle at altitude) ────────────────
-  const cruiseSamples = 40;
+  const cruiseSamples = 1000;
   for (let i = 0; i <= cruiseSamples; i++) {
     const frac = i / cruiseSamples;
     const elapsed = t_climbEnd + frac * timing.cruise;
-    const gcFrac = lerp(0.10, 0.90, frac);
+
+    const gcFrac = lerp(0.0, 0.90, frac); 
     const interp = geodesic.interpolateUsingFraction(gcFrac);
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
-    // Subtle altitude variation for realism
-    const alt = CRUISE_ALTITUDE + Math.sin(frac * Math.PI * 4) * 200;
+    
+    let alt = CRUISE_ALTITUDE;
+    if (frac < 0.1) {
+        alt = lerp(CLIMB_EXIT_ALT, CRUISE_ALTITUDE, frac / 0.1);
+    }
+    
     addSample(elapsed, lon, lat, alt);
   }
 
   // ─── DESCENT (cruise → approach altitude) ─────────────
-  const descentSamples = 20;
+  const descentSamples = 100;
   for (let i = 0; i <= descentSamples; i++) {
     const frac = i / descentSamples;
     const elapsed = t_cruiseEnd + frac * timing.descent;
@@ -242,7 +257,7 @@ export function createFlight(
   }
 
   // ─── LANDING (approach → touchdown) ───────────────────
-  const landingSamples = 20;
+  const landingSamples = 100;
   for (let i = 0; i <= landingSamples; i++) {
     const frac = i / landingSamples;
     const elapsed = t_descentEnd + frac * timing.landing;
@@ -436,7 +451,8 @@ function buildRouteDeparture(
       let alt = elevation;
       if (isLastSegment && frac > 0.5) {
         const liftFrac = (frac - 0.5) / 0.5;
-        alt = elevation + easeInQuad(liftFrac) * CLIMB_EXIT_ALT;
+        //alt = elevation + easeInQuad(liftFrac) * CLIMB_EXIT_ALT;
+        alt = elevation + easeInQuad(liftFrac) * 50;
       }
 
       addSample(elapsed, lon, lat, alt);
