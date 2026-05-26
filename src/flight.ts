@@ -6,8 +6,8 @@
  * For other airports, a generic heading-based departure is used.
  */
 import * as Cesium from "cesium";
-import type { Airport, DepartureRoute, RouteWaypoint } from "./airports";
-import { getDistanceKm, DEPARTURE_ROUTES } from "./airports";
+import type { Airport, DepartureRoute, ArrivalRoute, RouteWaypoint } from "./airports";
+import { getDistanceKm, DEPARTURE_ROUTES, getArrivalRoute } from "./airports";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -21,7 +21,10 @@ export type FlightPhase =
   | "cruise"        // Great-circle at cruise altitude
   | "descent"       // Descending to approach altitude
   | "landing"       // Final approach + touchdown
-  | "arrived";      // Parked at destination
+  | "rollout"       // Decelerating on runway after touchdown
+  | "arrival_taxi"  // Taxiing from runway to gate
+  | "arrival_gate"  // Parked at destination gate
+  | "arrived";      // Flight complete
 
 export interface FlightTiming {
   gate: number;         // 0 if no departure route
@@ -32,6 +35,9 @@ export interface FlightTiming {
   cruise: number;
   descent: number;
   landing: number;
+  rollout: number;      // 0 if no arrival route
+  arrivalTaxi: number;  // 0 if no arrival route
+  arrivalGate: number;  // 0 if no arrival route
 }
 
 export interface FlightPlan {
@@ -39,6 +45,7 @@ export interface FlightPlan {
   destination: Airport;
   distanceKm: number;
   departureRoute: DepartureRoute | null;
+  arrivalRoute: ArrivalRoute | null;
   timing: FlightTiming;
   totalDuration: number;
 }
@@ -74,6 +81,11 @@ const CLIMB_DURATION = 45;          // seconds
 const DESCENT_DURATION = 45;        // seconds
 const LANDING_DURATION = 30;        // seconds
 const MIN_CRUISE_DURATION = 15;     // seconds
+
+// Arrival phases (route-based)
+const ROLLOUT_SEGMENT_TIME = 4;     // seconds per runway rollout segment
+const ARRIVAL_TAXI_SPEED = 6;       // seconds per taxi segment
+const ARRIVAL_GATE_HOLD = 5;        // seconds parked at gate
 const CRUISE_SCALE = 0.06;          // seconds per km of distance
 
 // ─── Public API ─────────────────────────────────────────────
@@ -84,46 +96,54 @@ const CRUISE_SCALE = 0.06;          // seconds per km of distance
 export function planFlight(departure: Airport, destination: Airport): FlightPlan {
   const distanceKm = getDistanceKm(departure, destination);
   const route = DEPARTURE_ROUTES[departure.code] ?? null;
+  const arrival = getArrivalRoute(destination.code);
   const cruiseDuration = Math.max(MIN_CRUISE_DURATION, distanceKm * CRUISE_SCALE);
 
-  let timing: FlightTiming;
+  // ── Departure timing ───────────────────────────────────
+  let gateTime = 0, taxiTime = 0, runwayHoldTime = 0, takeoffTime: number;
 
   if (route) {
-    // Route-based departure: gate + taxi + hold + roll
-    const taxiSegments = route.taxiWaypoints.length + 1; // +1 for gate→first wp
-    const taxiTime = taxiSegments * TAXI_SPEED;
-    const rollSegments = route.runwayWaypoints.length + 1; // +1 for liftoff
-    const rollTime = TAKEOFF_ROLL_TIMES.slice(0, rollSegments)
+    const taxiSegments = route.taxiWaypoints.length + 1;
+    taxiTime = taxiSegments * TAXI_SPEED;
+    const rollSegments = route.runwayWaypoints.length + 1;
+    takeoffTime = TAKEOFF_ROLL_TIMES.slice(0, rollSegments)
       .reduce((sum, t) => sum + t, 0);
-
-    timing = {
-      gate: route.gateHoldTime,
-      taxi: taxiTime,
-      runwayHold: route.runwayHoldTime,
-      takeoff: rollTime,
-      climb: CLIMB_DURATION,
-      cruise: cruiseDuration,
-      descent: DESCENT_DURATION,
-      landing: LANDING_DURATION,
-    };
+    gateTime = route.gateHoldTime;
+    runwayHoldTime = route.runwayHoldTime;
   } else {
-    // Simple departure
-    timing = {
-      gate: 0,
-      taxi: 0,
-      runwayHold: 0,
-      takeoff: SIMPLE_TAKEOFF_DURATION,
-      climb: CLIMB_DURATION,
-      cruise: cruiseDuration,
-      descent: DESCENT_DURATION,
-      landing: LANDING_DURATION,
-    };
+    takeoffTime = SIMPLE_TAKEOFF_DURATION;
   }
 
-  const totalDuration = timing.gate + timing.taxi + timing.runwayHold +
-    timing.takeoff + timing.climb + timing.cruise + timing.descent + timing.landing;
+  // ── Arrival timing ─────────────────────────────────────
+  let rolloutTime = 0, arrivalTaxiTime = 0, arrivalGateTime = 0;
 
-  return { departure, destination, distanceKm, departureRoute: route, timing, totalDuration };
+  if (arrival) {
+    const rolloutSegments = arrival.rolloutWaypoints.length + 1; // +1 for runwayEnd
+    rolloutTime = rolloutSegments * ROLLOUT_SEGMENT_TIME;
+    const arrTaxiSegments = arrival.taxiToGateWaypoints.length + 1; // +1 for gate
+    arrivalTaxiTime = arrTaxiSegments * ARRIVAL_TAXI_SPEED;
+    arrivalGateTime = ARRIVAL_GATE_HOLD;
+  }
+
+  const timing: FlightTiming = {
+    gate: gateTime,
+    taxi: taxiTime,
+    runwayHold: runwayHoldTime,
+    takeoff: takeoffTime,
+    climb: CLIMB_DURATION,
+    cruise: cruiseDuration,
+    descent: DESCENT_DURATION,
+    landing: LANDING_DURATION,
+    rollout: rolloutTime,
+    arrivalTaxi: arrivalTaxiTime,
+    arrivalGate: arrivalGateTime,
+  };
+
+  const totalDuration = timing.gate + timing.taxi + timing.runwayHold +
+    timing.takeoff + timing.climb + timing.cruise + timing.descent +
+    timing.landing + timing.rollout + timing.arrivalTaxi + timing.arrivalGate;
+
+  return { departure, destination, distanceKm, departureRoute: route, arrivalRoute: arrival, timing, totalDuration };
 }
 
 /**
@@ -133,7 +153,7 @@ export function createFlight(
   viewer: Cesium.Viewer,
   plan: FlightPlan
 ): FlightResult {
-  const { departure, destination, timing, totalDuration, departureRoute } = plan;
+  const { departure, destination, timing, totalDuration, departureRoute, arrivalRoute } = plan;
 
   const start = viewer.clock.currentTime.clone();
   const stop = Cesium.JulianDate.addSeconds(start, totalDuration, new Cesium.JulianDate());
@@ -149,10 +169,10 @@ export function createFlight(
   position.setInterpolationOptions({
     interpolationDegree: 1,
     interpolationAlgorithm: Cesium.LinearApproximation,
-    //HermitePolynomialApproximation
   });
 
   const elev = departure.elevation;
+  const destElev = destination.elevation;
 
   // ── Phase time boundaries ──────────────────────────────
   const t_gateEnd = timing.gate;
@@ -162,7 +182,10 @@ export function createFlight(
   const t_climbEnd = t_takeoffEnd + timing.climb;
   const t_cruiseEnd = t_climbEnd + timing.cruise;
   const t_descentEnd = t_cruiseEnd + timing.descent;
-  // t_landingEnd = totalDuration
+  const t_landingEnd = t_descentEnd + timing.landing;
+  const t_rolloutEnd = t_landingEnd + timing.rollout;
+  const t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
+  // t_arrivalGateEnd = totalDuration
 
   // ── Determine liftoff position & great circle ──────────
   let liftoffLat: number;
@@ -187,17 +210,38 @@ export function createFlight(
   const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * climbDistanceDegrees;
   const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * climbDistanceDegrees;
 
-  const destHeadingRad = Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
+  // ── Determine landing target ───────────────────────────
+  // If we have an arrival route, land at the touchdownPoint;
+  // otherwise land at the airport center.
+  let landingTargetLat: number;
+  let landingTargetLon: number;
+  let landingTargetElev: number;
+
+  if (arrivalRoute) {
+    landingTargetLat = arrivalRoute.touchdownPoint.lat;
+    landingTargetLon = arrivalRoute.touchdownPoint.lon;
+    landingTargetElev = destElev;
+  } else {
+    landingTargetLat = destination.lat;
+    landingTargetLon = destination.lon;
+    landingTargetElev = destElev;
+  }
+
+  // ── Approach entry point ───────────────────────────────
+  // Compute approach direction: bearing from touchdown toward the "incoming" side
+  const destHeadingRad = arrivalRoute
+    ? computeBearingRad(arrivalRoute.rolloutWaypoints[0] ?? arrivalRoute.runwayEnd, arrivalRoute.touchdownPoint)
+    : Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
   
-  // Increase approach distance (0.25 degrees is approx 27 km) for a shallower slope
+  // Increase approach distance (0.25 degrees ≈ 27 km) for a shallower slope
   const approachDistanceDegrees = 0.25; 
-  const approachEntryLon = destination.lon + Math.sin(destHeadingRad) * approachDistanceDegrees;
-  const approachEntryLat = destination.lat + Math.cos(destHeadingRad) * approachDistanceDegrees;
+  const approachEntryLon = landingTargetLon + Math.sin(destHeadingRad) * approachDistanceDegrees;
+  const approachEntryLat = landingTargetLat + Math.cos(destHeadingRad) * approachDistanceDegrees;
 
   const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
   const approachEntryCartographic = Cesium.Cartographic.fromDegrees(approachEntryLon, approachEntryLat);
   
-  // Great circle now connects the climb exit directly to the extended approach entry point
+  // Great circle connects the climb exit to the approach entry point
   const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, approachEntryCartographic);
 
   // ═══════════════════════════════════════════════════════
@@ -272,12 +316,16 @@ export function createFlight(
     const frac = i / landingSamples;
     const elapsed = t_descentEnd + frac * timing.landing;
     
-    // Linear horizontal transition, but vertical profile follows a parabolic easeOutQuad curve
-    const lon = lerp(approachEntryLon, destination.lon, frac);
-    const lat = lerp(approachEntryLat, destination.lat, frac);
-    const alt = lerp(APPROACH_ENTRY_ALT, destination.elevation, easeOutQuad(frac));
+    const lon = lerp(approachEntryLon, landingTargetLon, frac);
+    const lat = lerp(approachEntryLat, landingTargetLat, frac);
+    const alt = lerp(APPROACH_ENTRY_ALT, landingTargetElev, easeOutQuad(frac));
     
     addSample(elapsed, lon, lat, alt);
+  }
+
+  // ─── ARRIVAL (rollout → taxi → gate) ──────────────────
+  if (arrivalRoute) {
+    buildRouteArrival(arrivalRoute, destElev, addSample, timing, t_landingEnd);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -324,7 +372,10 @@ export function createFlight(
     if (elapsed <= t_climbEnd) return "climb";
     if (elapsed <= t_cruiseEnd) return "cruise";
     if (elapsed <= t_descentEnd) return "descent";
-    if (elapsed <= totalDuration) return "landing";
+    if (elapsed <= t_landingEnd) return "landing";
+    if (timing.rollout > 0 && elapsed <= t_rolloutEnd) return "rollout";
+    if (timing.arrivalTaxi > 0 && elapsed <= t_arrivalTaxiEnd) return "arrival_taxi";
+    if (timing.arrivalGate > 0 && elapsed < totalDuration) return "arrival_gate";
     return "arrived";
   }
 
@@ -494,6 +545,89 @@ function buildSimpleDeparture(
     }
 
     addSample(elapsed, lon, lat, alt);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ARRIVAL BUILDER
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Build samples for a route-based arrival: rollout → taxi to gate → gate hold.
+ * Called after the landing phase ends (plane has touched down at touchdownPoint).
+ */
+function buildRouteArrival(
+  route: ArrivalRoute,
+  elevation: number,
+  addSample: AddSampleFn,
+  timing: FlightTiming,
+  tStart: number
+): void {
+  let t = tStart;
+
+  // ── ROLLOUT (touchdown → rolloutWaypoints → runwayEnd) ──
+  const rolloutPath: RouteWaypoint[] = [
+    route.touchdownPoint,
+    ...route.rolloutWaypoints,
+    route.runwayEnd,
+  ];
+
+  const numRolloutSegments = rolloutPath.length - 1;
+  const rolloutSegDuration = timing.rollout / numRolloutSegments;
+
+  for (let seg = 0; seg < numRolloutSegments; seg++) {
+    const from = rolloutPath[seg];
+    const to = rolloutPath[seg + 1];
+    const subStart = seg === 0 ? 0 : 1;
+    for (let sub = subStart; sub <= 4; sub++) {
+      const frac = sub / 4;
+      const elapsed = t + seg * rolloutSegDuration + frac * rolloutSegDuration;
+      const lon = lerp(from.lon, to.lon, frac);
+      const lat = lerp(from.lat, to.lat, frac);
+      addSample(elapsed, lon, lat, elevation);
+    }
+  }
+  t += timing.rollout;
+
+  // ── ARRIVAL TAXI (runwayEnd → taxiToGateWaypoints → gate) ──
+  const taxiPath: RouteWaypoint[] = [
+    route.runwayEnd,
+    ...route.taxiToGateWaypoints,
+    route.gate,
+  ];
+
+  const numTaxiSegments = taxiPath.length - 1;
+  const taxiSegDuration = timing.arrivalTaxi / numTaxiSegments;
+
+  for (let seg = 0; seg < numTaxiSegments; seg++) {
+    const from = taxiPath[seg];
+    const to = taxiPath[seg + 1];
+    const subStart = seg === 0 ? 0 : 1;
+    for (let sub = subStart; sub <= 3; sub++) {
+      const frac = sub / 3;
+      const elapsed = t + seg * taxiSegDuration + frac * taxiSegDuration;
+      const lon = lerp(from.lon, to.lon, frac);
+      const lat = lerp(from.lat, to.lat, frac);
+      addSample(elapsed, lon, lat, elevation);
+    }
+  }
+  t += timing.arrivalTaxi;
+
+  // ── ARRIVAL GATE HOLD ─────────────────────────────────
+  // Tiny drift so VelocityOrientationProperty can compute heading
+  const lastTaxiPoint = route.taxiToGateWaypoints[route.taxiToGateWaypoints.length - 1] ?? route.runwayEnd;
+  const gateBearing = computeBearingRad(lastTaxiPoint, route.gate);
+  const DRIFT = 0.0000005;
+
+  for (let i = 0; i <= 5; i++) {
+    const frac = i / 5;
+    const elapsed = t + frac * timing.arrivalGate;
+    addSample(
+      elapsed,
+      route.gate.lon + Math.sin(gateBearing) * DRIFT * (frac * timing.arrivalGate),
+      route.gate.lat + Math.cos(gateBearing) * DRIFT * (frac * timing.arrivalGate),
+      elevation
+    );
   }
 }
 

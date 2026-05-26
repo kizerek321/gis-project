@@ -124,7 +124,7 @@ function updateFlightInfo(): void {
   // Validate — can't fly to same airport
   const isSame = dep.code === dest.code;
   flyButton.disabled = isSame;
-  flyButton.textContent = isSame ? "Select different airports" : "✈️ Start Flight";
+  flyButton.textContent = isSame ? "Select different airports" : "Start Flight";
 }
 
 // ─── Start flight simulation ────────────────────────────────
@@ -188,7 +188,7 @@ function startFlight(): void {
   startPhaseTracking();
 
   console.log(
-    `🛫 Flight started: ${dep.city} → ${dest.city} (${Math.round(plan.distanceKm)} km, ${Math.round(plan.totalDuration)}s)`
+    `Flight started: ${dep.city} → ${dest.city} (${Math.round(plan.distanceKm)} km, ${Math.round(plan.totalDuration)}s)`
   );
 }
 
@@ -295,15 +295,18 @@ function startPhaseTracking(): void {
 function updatePhaseUI(phase: FlightPhase): void {
   const phaseLabels: Record<FlightPhase, string> = {
     preflight: "Pre-flight",
-    gate: "🅿️ At Gate",
-    taxi: "🚕 Taxiing",
-    runway_hold: "🛫 Cleared for Takeoff",
-    takeoff: "🛫 Taking Off!",
-    climb: "📈 Climbing",
-    cruise: "✈️ Cruising",
-    descent: "📉 Descending",
-    landing: "🛬 Landing",
-    arrived: "✅ Arrived",
+    gate: "At Gate",
+    taxi: "Taxiing",
+    runway_hold: "Cleared for Takeoff",
+    takeoff: "Taking Off!",
+    climb: "Climbing",
+    cruise: "Cruising",
+    descent: "Descending",
+    landing: "Landing",
+    rollout: "Braking",
+    arrival_taxi: "Taxiing to Gate",
+    arrival_gate: "At Gate",
+    arrived: "Arrived",
   };
 
   const phaseColors: Record<FlightPhase, string> = {
@@ -316,6 +319,9 @@ function updatePhaseUI(phase: FlightPhase): void {
     cruise: "#10b981",
     descent: "#8b5cf6",
     landing: "#f59e0b",
+    rollout: "#f97316",
+    arrival_taxi: "#eab308",
+    arrival_gate: "#64748b",
     arrived: "#10b981",
   };
 
@@ -331,7 +337,7 @@ function updatePhaseUI(phase: FlightPhase): void {
 // ─── Arrival handling ───────────────────────────────────────
 
 function handleArrival(): void {
-  console.log("🛬 Flight arrived!");
+  console.log("Flight arrived!");
 
   viewer.clock.shouldAnimate = false;
   cancelButton.textContent = "New Flight";
@@ -350,7 +356,7 @@ function resetFlight(): void {
   // Reset UI
   flyButton.style.display = "block";
   cancelButton.style.display = "none";
-  cancelButton.textContent = "✕ Cancel Flight";
+  cancelButton.textContent = "Cancel Flight";
   speedControls.style.display = "none";
   phaseIndicator.style.display = "none";
   departureSelect.disabled = false;

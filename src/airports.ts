@@ -170,6 +170,38 @@ export const DEPARTURE_ROUTES: Record<string, DepartureRoute> = {
   },
 };
 
+// ─── Arrival Route (reverse of DepartureRoute) ───────────────
+
+export interface ArrivalRoute {
+  /** Touchdown point (= liftoffPoint from DepartureRoute) */
+  touchdownPoint: RouteWaypoint;
+  /** Runway rollout waypoints after landing (runwayWaypoints reversed) */
+  rolloutWaypoints: RouteWaypoint[];
+  /** End of rollout / runway threshold (= runwayThreshold) */
+  runwayEnd: RouteWaypoint;
+  /** Taxi waypoints from runway to gate (taxiWaypoints reversed) */
+  taxiToGateWaypoints: RouteWaypoint[];
+  /** Destination gate position */
+  gate: RouteWaypoint;
+}
+
+/**
+ * Build an ArrivalRoute for the given airport by reversing
+ * its DepartureRoute waypoints. Returns null if no route exists.
+ */
+export function getArrivalRoute(code: string): ArrivalRoute | null {
+  const dep = DEPARTURE_ROUTES[code];
+  if (!dep) return null;
+
+  return {
+    touchdownPoint: dep.liftoffPoint,
+    rolloutWaypoints: [...dep.runwayWaypoints].reverse(),
+    runwayEnd: dep.runwayThreshold,
+    taxiToGateWaypoints: [...dep.taxiWaypoints].reverse(),
+    gate: dep.gate,
+  };
+}
+
 /**
  * Compute bearing (heading) in radians from point A to point B.
  * Returns 0 = North, π/2 = East, π = South, 3π/2 = West.
