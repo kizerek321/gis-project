@@ -1,15 +1,19 @@
 /**
  * Flight path engine — generates realistic departure → cruise → landing paths.
  *
- * For airports with a DepartureRoute (e.g. GDN), the plane follows real GPS
- * waypoints: gate hold → taxi → runway hold → takeoff roll → liftoff.
- * For other airports, a generic heading-based departure is used.
+ * Speed profile (AGL — above ground level):
+ *   Ground:    max 50 km/h (taxi, rollout end)
+ *   0–400m:    300 km/h (liftoff / final approach)
+ *   400–800m:  300 → 450 km/h
+ *   800–3000m: 450 → 900 km/h (main speed increase)
+ *   3000m+:    900 km/h (cruise, never exceeded)
+ *
+ * Climb goes STRAIGHT from the runway heading (no turning).
+ * Landing mirrors the climb speed profile in reverse.
  */
 import * as Cesium from "cesium";
 import type { Airport, DepartureRoute, ArrivalRoute, RouteWaypoint } from "./airports";
 import { getDistanceKm, DEPARTURE_ROUTES, getArrivalRoute } from "./airports";
-
-// ─── Types ──────────────────────────────────────────────────
 
 export type FlightPhase =
   | "preflight"
@@ -63,65 +67,281 @@ export interface FlightResult {
   } | null;
 }
 
-// ─── Constants ──────────────────────────────────────────────
+// ─── Speed & Altitude Constants ─────────────────────────────
 
-const CRUISE_ALTITUDE = 10000;     // meters (~33,000 ft)
-const CLIMB_EXIT_ALT = 3000;       // altitude at end of takeoff / start of climb
-const APPROACH_ENTRY_ALT = 3000;   // altitude at start of final approach
+const CRUISE_ALTITUDE = 10000;     // meters MSL (~33,000 ft)
 
-// Timing for generic departure (airports without a route)
-const SIMPLE_TAKEOFF_DURATION = 20;  // seconds
+// Speed constants (km/h) — exported for UI
+export const MAX_SPEED_KMH = 900;
+export const MAX_GROUND_SPEED_KMH = 50;
+export const LIFTOFF_SPEED_KMH = 300;
+export const CLIMB_MID_SPEED_KMH = 450;
 
-// Timing for route-based departure
-const TAXI_SPEED = 6;               // seconds per taxi segment
-const TAKEOFF_ROLL_TIMES = [5, 4, 3, 2]; // seconds per runway segment (accelerating)
+// Speed constants (m/s)
+const MAX_SPEED_MS = MAX_SPEED_KMH / 3.6;            // 250 m/s
+const MAX_GROUND_SPEED_MS = MAX_GROUND_SPEED_KMH / 3.6;  // ~13.9 m/s
+const LIFTOFF_SPEED_MS = LIFTOFF_SPEED_KMH / 3.6;    // ~83.3 m/s
+const CLIMB_MID_SPEED_MS = CLIMB_MID_SPEED_KMH / 3.6;    // ~125 m/s
 
-// Post-departure phases
-const CLIMB_DURATION = 45;          // seconds
-const DESCENT_DURATION = 45;        // seconds
-const LANDING_DURATION = 30;        // seconds
-const MIN_CRUISE_DURATION = 15;     // seconds
+// Altitude thresholds (AGL — meters above ground level)
+const SPEED_RAMP_START_AGL = 400;    // Below: liftoff speed (300 km/h)
+const SPEED_RAMP_MID_AGL = 800;      // 450 km/h reached here
+const SPEED_RAMP_END_AGL = 3000;     // Full cruise speed (900 km/h) reached
 
-// Arrival phases (route-based)
-const ROLLOUT_SEGMENT_TIME = 4;     // seconds per runway rollout segment
-const ARRIVAL_TAXI_SPEED = 6;       // seconds per taxi segment
-const ARRIVAL_GATE_HOLD = 5;        // seconds parked at gate
-const CRUISE_SCALE = 0.06;          // seconds per km of distance
+// Geometry
+const CLIMB_DISTANCE_DEG = 0.1;      // ~11 km horizontal climb distance
+const APPROACH_DISTANCE_DEG = 0.25;  // ~27 km approach distance
 
-// ─── Public API ─────────────────────────────────────────────
+// Fixed durations
+const ARRIVAL_GATE_HOLD = 5;         // seconds parked at destination gate
+const MIN_CRUISE_DURATION = 15;      // seconds minimum cruise time
+
+// ─── Speed Profile ──────────────────────────────────────────
+
+/**
+ * Returns the airplane speed (m/s) based on altitude above ground.
+ *
+ * Profile:
+ *   Ground level:     50 km/h   (MAX_GROUND_SPEED)
+ *   0 – 400m AGL:    300 km/h  (LIFTOFF_SPEED)
+ *   400 – 800m AGL:  300→450   (ramp to CLIMB_MID_SPEED)
+ *   800 – 3000m AGL: 450→900   (main speed increase)
+ *   Above 3000m AGL: 900 km/h  (MAX_SPEED — never exceeded)
+ */
+function getSpeedForAltitude(altitude: number, groundElev: number): number {
+  const agl = altitude - groundElev;
+  if (agl <= 0) return MAX_GROUND_SPEED_MS;
+  if (agl <= SPEED_RAMP_START_AGL) return LIFTOFF_SPEED_MS;
+  if (agl <= SPEED_RAMP_MID_AGL) {
+    const frac = (agl - SPEED_RAMP_START_AGL) / (SPEED_RAMP_MID_AGL - SPEED_RAMP_START_AGL);
+    return lerp(LIFTOFF_SPEED_MS, CLIMB_MID_SPEED_MS, frac);
+  }
+  if (agl <= SPEED_RAMP_END_AGL) {
+    const frac = (agl - SPEED_RAMP_MID_AGL) / (SPEED_RAMP_END_AGL - SPEED_RAMP_MID_AGL);
+    return lerp(CLIMB_MID_SPEED_MS, MAX_SPEED_MS, frac);
+  }
+  return MAX_SPEED_MS;
+}
+
+// ─── Distance Helpers ───────────────────────────────────────
+
+/** Haversine distance between two waypoints in meters. */
+function waypointDistMeters(a: RouteWaypoint, b: RouteWaypoint): number {
+  const R = 6371000;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const lat1 = a.lat * Math.PI / 180;
+  const lat2 = b.lat * Math.PI / 180;
+  const sinDLat2 = Math.sin(dLat / 2);
+  const sinDLon2 = Math.sin(dLon / 2);
+  const h = sinDLat2 * sinDLat2 + Math.cos(lat1) * Math.cos(lat2) * sinDLon2 * sinDLon2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+/** Total path length through an array of waypoints (meters). */
+function computePathDistance(waypoints: RouteWaypoint[]): number {
+  let total = 0;
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    total += waypointDistMeters(waypoints[i], waypoints[i + 1]);
+  }
+  return total;
+}
+
+/** Haversine distance between two lat/lon pairs in meters. */
+function haversineDistMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  return waypointDistMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
+}
+
+// ─── Variable-Speed Timing ──────────────────────────────────
+
+/**
+ * Compute total time (seconds) to traverse a path with altitude-dependent speed.
+ * Uses numerical integration over the given number of segments.
+ */
+function computeVariableSpeedDuration(
+  horizDistM: number,
+  startAlt: number,
+  endAlt: number,
+  groundElev: number,
+  segments: number = 100,
+  easeFn: (t: number) => number = (t) => t
+): number {
+  let totalTime = 0;
+  for (let i = 0; i < segments; i++) {
+    const f0 = i / segments;
+    const f1 = (i + 1) / segments;
+    const fMid = (f0 + f1) / 2;
+
+    const alt0 = lerp(startAlt, endAlt, easeFn(f0));
+    const alt1 = lerp(startAlt, endAlt, easeFn(f1));
+    const altMid = lerp(startAlt, endAlt, easeFn(fMid));
+
+    const segHorizDist = horizDistM / segments;
+    const altChange = alt1 - alt0;
+    const segDist = Math.sqrt(segHorizDist * segHorizDist + altChange * altChange);
+
+    const speed = getSpeedForAltitude(altMid, groundElev);
+    totalTime += segDist / speed;
+  }
+  return totalTime;
+}
+
+/**
+ * Compute cumulative time at each of `samples+1` evenly-spaced path positions.
+ * Returns array of length `samples+1` with cumTimes[0]=0.
+ */
+function computeCumulativeTimes(
+  horizDistM: number,
+  startAlt: number,
+  endAlt: number,
+  groundElev: number,
+  samples: number,
+  easeFn: (t: number) => number = (t) => t
+): number[] {
+  const cumTimes: number[] = [0];
+  for (let i = 1; i <= samples; i++) {
+    const f0 = (i - 1) / samples;
+    const f1 = i / samples;
+    const fMid = (f0 + f1) / 2;
+
+    const alt0 = lerp(startAlt, endAlt, easeFn(f0));
+    const alt1 = lerp(startAlt, endAlt, easeFn(f1));
+    const altMid = lerp(startAlt, endAlt, easeFn(fMid));
+
+    const segHorizDist = horizDistM / samples;
+    const altChange = alt1 - alt0;
+    const segDist = Math.sqrt(segHorizDist * segHorizDist + altChange * altChange);
+
+    const speed = getSpeedForAltitude(altMid, groundElev);
+    cumTimes.push(cumTimes[i - 1] + segDist / speed);
+  }
+  return cumTimes;
+}
+
+/**
+ * For a linear speed ramp (v0 → v1) over a distance, compute the fraction
+ * of total time elapsed at a given fraction of total distance.
+ *
+ * Uses analytical integral: timeFrac = ln(v(f)/v0) / ln(v1/v0).
+ */
+function linearSpeedTimeFrac(distFrac: number, v0: number, v1: number): number {
+  if (Math.abs(v1 - v0) < 0.01) return distFrac; // constant speed
+  const vAtF = v0 + (v1 - v0) * distFrac;
+  return Math.log(vAtF / v0) / Math.log(v1 / v0);
+}
+
+/**
+ * Total time to traverse a distance with linearly-changing speed v0 → v1.
+ *
+ * Analytical: T = D · ln(v1/v0) / (v1 − v0).
+ */
+function linearSpeedTotalTime(dist: number, v0: number, v1: number): number {
+  if (Math.abs(v1 - v0) < 0.01) return dist / v0;
+  return dist * Math.log(v1 / v0) / (v1 - v0);
+}
+
+// ─── Plan Flight ────────────────────────────────────────────
 
 /**
  * Calculate flight timing plan (used for preview before starting).
+ * Computes phase durations from real waypoint distances and speed profiles.
  */
 export function planFlight(departure: Airport, destination: Airport): FlightPlan {
   const distanceKm = getDistanceKm(departure, destination);
   const route = DEPARTURE_ROUTES[departure.code] ?? null;
   const arrival = getArrivalRoute(destination.code);
-  const cruiseDuration = Math.max(MIN_CRUISE_DURATION, distanceKm * CRUISE_SCALE);
 
-  // ── Departure timing ───────────────────────────────────
-  let gateTime = 0, taxiTime = 0, runwayHoldTime = 0, takeoffTime: number;
+  const elev = departure.elevation;
+  const destElev = destination.elevation;
 
-  if (route) {
-    const taxiSegments = route.taxiWaypoints.length + 1;
-    taxiTime = taxiSegments * TAXI_SPEED;
-    const rollSegments = route.runwayWaypoints.length + 1;
-    takeoffTime = TAKEOFF_ROLL_TIMES.slice(0, rollSegments)
-      .reduce((sum, t) => sum + t, 0);
-    gateTime = route.gateHoldTime;
-    runwayHoldTime = route.runwayHoldTime;
-  } else {
-    takeoffTime = SIMPLE_TAKEOFF_DURATION;
-  }
+  // ── Gate & hold (fixed) ──────────────────────────────────
+  const gateTime = route.gateHoldTime;
+  const runwayHoldTime = route.runwayHoldTime;
 
-  // ── Arrival timing ─────────────────────────────────────
+  // ── Taxi (constant speed: 50 km/h) ──────────────────────
+  const taxiPath = [route.gate, ...route.taxiWaypoints, route.runwayThreshold];
+  const taxiDistM = computePathDistance(taxiPath);
+  const taxiTime = taxiDistM / MAX_GROUND_SPEED_MS;
+
+  // ── Takeoff roll (acceleration 0 → 300 km/h) ───────────
+  const rwyPath = [route.runwayThreshold, ...route.runwayWaypoints, route.liftoffPoint];
+  const rwyDistM = computePathDistance(rwyPath);
+  // Constant acceleration: time = 2 · distance / final_speed
+  const takeoffTime = 2 * rwyDistM / LIFTOFF_SPEED_MS;
+
+  // ── Climb geometry ──────────────────────────────────────
+  const prevPoint = route.runwayWaypoints[route.runwayWaypoints.length - 1] ?? route.runwayThreshold;
+  const runwayHeadingRad = computeBearingRad(prevPoint, route.liftoffPoint);
+
+  const climbExitLon = route.liftoffPoint.lon + Math.sin(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
+  const climbExitLat = route.liftoffPoint.lat + Math.cos(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
+
+  const climbHorizDistM = haversineDistMeters(
+    route.liftoffPoint.lat, route.liftoffPoint.lon,
+    climbExitLat, climbExitLon
+  );
+
+  const climbStartAlt = elev + 50;
+  const climbEndAlt = elev + SPEED_RAMP_END_AGL; // 3000m AGL
+
+  const climbTime = computeVariableSpeedDuration(
+    climbHorizDistM, climbStartAlt, climbEndAlt, elev
+  );
+
+  // ── Approach geometry ───────────────────────────────────
+  const landingTargetLat = arrival!.touchdownPoint.lat;
+  const landingTargetLon = arrival!.touchdownPoint.lon;
+
+  const destHeadingRad = arrival
+    ? computeBearingRad(
+        arrival.rolloutWaypoints[0] ?? arrival.runwayEnd,
+        arrival.touchdownPoint
+      )
+    : Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
+
+  const approachEntryLon = landingTargetLon + Math.sin(destHeadingRad) * APPROACH_DISTANCE_DEG;
+  const approachEntryLat = landingTargetLat + Math.cos(destHeadingRad) * APPROACH_DISTANCE_DEG;
+
+  const approachHorizDistM = haversineDistMeters(
+    approachEntryLat, approachEntryLon,
+    landingTargetLat, landingTargetLon
+  );
+
+  const approachStartAlt = destElev + SPEED_RAMP_END_AGL; // 3000m AGL
+  const approachEndAlt = destElev;
+
+  const landingTime = computeVariableSpeedDuration(
+    approachHorizDistM, approachStartAlt, approachEndAlt, destElev, 100, easeOutQuad
+  );
+
+  // ── Cruise & Descent ────────────────────────────────────
+  const gcDistM = haversineDistMeters(
+    climbExitLat, climbExitLon,
+    approachEntryLat, approachEntryLon
+  );
+  const cruiseDistM = gcDistM * 0.8;
+  const descentDistM = gcDistM * 0.2;
+
+  // Cruise (includes climb from climbEndAlt to CRUISE_ALTITUDE) — all at MAX_SPEED
+  const cruiseTime = Math.max(MIN_CRUISE_DURATION, cruiseDistM / MAX_SPEED_MS);
+
+  // Descent (CRUISE_ALTITUDE → approachStartAlt) — all at MAX_SPEED (above 3000m AGL)
+  const descentTime = descentDistM / MAX_SPEED_MS;
+
+  // ── Arrival phases ──────────────────────────────────────
   let rolloutTime = 0, arrivalTaxiTime = 0, arrivalGateTime = 0;
 
   if (arrival) {
-    const rolloutSegments = arrival.rolloutWaypoints.length + 1; // +1 for runwayEnd
-    rolloutTime = rolloutSegments * ROLLOUT_SEGMENT_TIME;
-    const arrTaxiSegments = arrival.taxiToGateWaypoints.length + 1; // +1 for gate
-    arrivalTaxiTime = arrTaxiSegments * ARRIVAL_TAXI_SPEED;
+    // Rollout: decelerate from ~300 km/h to ~50 km/h
+    const rolloutPath = [arrival.touchdownPoint, ...arrival.rolloutWaypoints, arrival.runwayEnd];
+    const rolloutDistM = computePathDistance(rolloutPath);
+    rolloutTime = linearSpeedTotalTime(rolloutDistM, LIFTOFF_SPEED_MS, MAX_GROUND_SPEED_MS);
+
+    // Arrival taxi: constant 50 km/h
+    const arrTaxiPath = [arrival.runwayEnd, ...arrival.taxiToGateWaypoints, arrival.gate];
+    const arrTaxiDistM = computePathDistance(arrTaxiPath);
+    arrivalTaxiTime = arrTaxiDistM / MAX_GROUND_SPEED_MS;
+
     arrivalGateTime = ARRIVAL_GATE_HOLD;
   }
 
@@ -130,10 +350,10 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
     taxi: taxiTime,
     runwayHold: runwayHoldTime,
     takeoff: takeoffTime,
-    climb: CLIMB_DURATION,
-    cruise: cruiseDuration,
-    descent: DESCENT_DURATION,
-    landing: LANDING_DURATION,
+    climb: climbTime,
+    cruise: cruiseTime,
+    descent: descentTime,
+    landing: landingTime,
     rollout: rolloutTime,
     arrivalTaxi: arrivalTaxiTime,
     arrivalGate: arrivalGateTime,
@@ -145,6 +365,8 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
 
   return { departure, destination, distanceKm, departureRoute: route, arrivalRoute: arrival, timing, totalDuration };
 }
+
+// ─── Create Flight ──────────────────────────────────────────
 
 /**
  * Build the complete flight entity with sampled positions.
@@ -174,7 +396,7 @@ export function createFlight(
   const elev = departure.elevation;
   const destElev = destination.elevation;
 
-  // ── Phase time boundaries ──────────────────────────────
+  // Phase time boundaries
   const t_gateEnd = timing.gate;
   const t_taxiEnd = t_gateEnd + timing.taxi;
   const t_holdEnd = t_taxiEnd + timing.runwayHold;
@@ -187,7 +409,7 @@ export function createFlight(
   const t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
   // t_arrivalGateEnd = totalDuration
 
-  // ── Determine liftoff position & great circle ──────────
+  // ── Determine liftoff position & runway heading ────────
   let liftoffLat: number;
   let liftoffLon: number;
   let runwayHeadingRad: number;
@@ -198,84 +420,68 @@ export function createFlight(
     const prevPoint = departureRoute.runwayWaypoints[departureRoute.runwayWaypoints.length - 1] ?? departureRoute.runwayThreshold;
     runwayHeadingRad = computeBearingRad(prevPoint, departureRoute.liftoffPoint);
   } else {
-    // Generic: a point slightly ahead along runway heading
     runwayHeadingRad = Cesium.Math.toRadians(departure.runwayHeading);
     liftoffLon = departure.lon + Math.sin(runwayHeadingRad) * 0.02;
     liftoffLat = departure.lat + Math.cos(runwayHeadingRad) * 0.02;
   }
 
-  //(0.1 ~ 11 km)
-  const climbDistanceDegrees = 0.1; 
-  
-  const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * climbDistanceDegrees;
-  const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * climbDistanceDegrees;
+  // Climb exit — straight ahead from runway heading
+  const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
+  const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
 
-  // ── Determine landing target ───────────────────────────
-  // If we have an arrival route, land at the touchdownPoint;
-  // otherwise land at the airport center.
+  // Dynamic altitude thresholds (AGL-based)
+  const climbStartAlt = elev + 50;
+  const climbEndAlt = elev + SPEED_RAMP_END_AGL;          // 3000m AGL
+  const approachEntryAlt = destElev + SPEED_RAMP_END_AGL;  // 3000m AGL
+
+  // Determine landing target
   let landingTargetLat: number;
   let landingTargetLon: number;
   let landingTargetElev: number;
 
-  if (arrivalRoute) {
-    landingTargetLat = arrivalRoute.touchdownPoint.lat;
-    landingTargetLon = arrivalRoute.touchdownPoint.lon;
-    landingTargetElev = destElev;
-  } else {
-    landingTargetLat = destination.lat;
-    landingTargetLon = destination.lon;
-    landingTargetElev = destElev;
-  }
+  landingTargetLat = arrivalRoute!.touchdownPoint.lat;
+  landingTargetLon = arrivalRoute!.touchdownPoint.lon;
+  landingTargetElev = destElev;
 
-  // ── Approach entry point ───────────────────────────────
-  // Compute approach direction: bearing from touchdown toward the "incoming" side
+  // Approach entry point
   const destHeadingRad = arrivalRoute
     ? computeBearingRad(arrivalRoute.rolloutWaypoints[0] ?? arrivalRoute.runwayEnd, arrivalRoute.touchdownPoint)
     : Cesium.Math.toRadians((destination.runwayHeading + 180) % 360);
-  
-  // Increase approach distance (0.25 degrees ≈ 27 km) for a shallower slope
-  const approachDistanceDegrees = 0.25; 
-  const approachEntryLon = landingTargetLon + Math.sin(destHeadingRad) * approachDistanceDegrees;
-  const approachEntryLat = landingTargetLat + Math.cos(destHeadingRad) * approachDistanceDegrees;
+
+  const approachEntryLon = landingTargetLon + Math.sin(destHeadingRad) * APPROACH_DISTANCE_DEG;
+  const approachEntryLat = landingTargetLat + Math.cos(destHeadingRad) * APPROACH_DISTANCE_DEG;
 
   const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
   const approachEntryCartographic = Cesium.Cartographic.fromDegrees(approachEntryLon, approachEntryLat);
-  
+
   // Great circle connects the climb exit to the approach entry point
   const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, approachEntryCartographic);
-
-  // ═══════════════════════════════════════════════════════
-  // SAMPLE GENERATION
-  // ═══════════════════════════════════════════════════════
 
   function addSample(elapsed: number, lon: number, lat: number, alt: number): void {
     const time = Cesium.JulianDate.addSeconds(start, elapsed, new Cesium.JulianDate());
     position.addSample(time, Cesium.Cartesian3.fromDegrees(lon, lat, alt));
   }
 
-  if (departureRoute) {
-    // ─── ROUTE-BASED DEPARTURE ─────────────────────────
-    buildRouteDeparture(departureRoute, elev, addSample, timing);
-  } else {
-    // ─── SIMPLE DEPARTURE ──────────────────────────────
-    buildSimpleDeparture(departure, addSample, timing);
-  }
+  // ── ROUTE-BASED DEPARTURE ────────────────────────────────
+  buildRouteDeparture(departureRoute!, elev, addSample, timing);
 
-  // ─── CLIMB (liftoff → cruise altitude) ────────────────
+  // ── CLIMB (liftoff → 3000m AGL, straight from runway heading) ──
   const climbSamples = 100;
+  const climbHorizDistM = haversineDistMeters(liftoffLat, liftoffLon, climbExitLat, climbExitLon);
+  const climbCumTimes = computeCumulativeTimes(
+    climbHorizDistM, climbStartAlt, climbEndAlt, elev, climbSamples
+  );
+
   for (let i = 0; i <= climbSamples; i++) {
     const frac = i / climbSamples;
-    const elapsed = t_takeoffEnd + frac * timing.climb;
-
-    //linear
+    const elapsed = t_takeoffEnd + climbCumTimes[i];
     const lon = lerp(liftoffLon, climbExitLon, frac);
     const lat = lerp(liftoffLat, climbExitLat, frac);
-    const alt = lerp(elev + 50, CLIMB_EXIT_ALT, frac);
-    
+    const alt = lerp(climbStartAlt, climbEndAlt, frac);
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ─── CRUISE (great circle at altitude) ────────────────
+  // ── CRUISE (great circle at altitude) ────────────────────
   const cruiseSamples = 1000;
   for (let i = 0; i <= cruiseSamples; i++) {
     const frac = i / cruiseSamples;
@@ -285,52 +491,55 @@ export function createFlight(
     const interp = geodesic.interpolateUsingFraction(gcFrac);
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
-    
+
     let alt = CRUISE_ALTITUDE;
     if (frac < 0.1) {
-        alt = lerp(CLIMB_EXIT_ALT, CRUISE_ALTITUDE, frac / 0.1);
+      // Initial climb from climbEndAlt to CRUISE_ALTITUDE
+      alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / 0.1);
     }
-    
+
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ─── DESCENT (cruise → approach altitude) ─────────────
+  // ── DESCENT (cruise → approach altitude) ─────────────────
   const descentSamples = 100;
   for (let i = 0; i <= descentSamples; i++) {
     const frac = i / descentSamples;
     const elapsed = t_cruiseEnd + frac * timing.descent;
-    
+
     // Finish the remaining 20% of the great circle route
     const gcFrac = lerp(0.80, 1.0, frac);
     const interp = geodesic.interpolateUsingFraction(gcFrac);
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
-    const alt = lerp(CRUISE_ALTITUDE, APPROACH_ENTRY_ALT, easeInOutCubic(frac));
-    
+    const alt = lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(frac));
+
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ─── LANDING (approach → touchdown) ───────────────────
+  // ── LANDING (approach → touchdown, with speed profile) ───
   const landingSamples = 100;
+  const approachHorizDistM = haversineDistMeters(
+    approachEntryLat, approachEntryLon,
+    landingTargetLat, landingTargetLon
+  );
+  const landingCumTimes = computeCumulativeTimes(
+    approachHorizDistM, approachEntryAlt, landingTargetElev, destElev, landingSamples, easeOutQuad
+  );
+
   for (let i = 0; i <= landingSamples; i++) {
     const frac = i / landingSamples;
-    const elapsed = t_descentEnd + frac * timing.landing;
-    
+    const elapsed = t_descentEnd + landingCumTimes[i];
     const lon = lerp(approachEntryLon, landingTargetLon, frac);
     const lat = lerp(approachEntryLat, landingTargetLat, frac);
-    const alt = lerp(APPROACH_ENTRY_ALT, landingTargetElev, easeOutQuad(frac));
-    
+    const alt = lerp(approachEntryAlt, landingTargetElev, easeOutQuad(frac));
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ─── ARRIVAL (rollout → taxi → gate) ──────────────────
+  // ── ARRIVAL (rollout → taxi → gate) ──────────────────────
   if (arrivalRoute) {
     buildRouteArrival(arrivalRoute, destElev, addSample, timing, t_landingEnd);
   }
-
-  // ═══════════════════════════════════════════════════════
-  // ENTITY
-  // ═══════════════════════════════════════════════════════
 
   const entity = viewer.entities.add({
     name: `Flight ${departure.code} → ${destination.code}`,
@@ -357,10 +566,6 @@ export function createFlight(
       trailTime: totalDuration,
     },
   });
-
-  // ═══════════════════════════════════════════════════════
-  // PHASE RESOLVER
-  // ═══════════════════════════════════════════════════════
 
   function getPhase(currentTime: Cesium.JulianDate): FlightPhase {
     const elapsed = Cesium.JulianDate.secondsDifference(currentTime, start);
@@ -393,14 +598,13 @@ export function createFlight(
   return { entity, plan, startTime: start, stopTime: stop, getPhase, departureCamera };
 }
 
-// ═══════════════════════════════════════════════════════════
-// DEPARTURE BUILDERS
-// ═══════════════════════════════════════════════════════════
+// ─── Build Route Departure ──────────────────────────────────
 
 type AddSampleFn = (elapsed: number, lon: number, lat: number, alt: number) => void;
 
 /**
  * Build samples for a route-based departure: gate → taxi → hold → takeoff roll → liftoff.
+ * Taxi at 50 km/h, takeoff roll with acceleration from 0 to 300 km/h.
  */
 function buildRouteDeparture(
   route: DepartureRoute,
@@ -428,34 +632,40 @@ function buildRouteDeparture(
   }
   t = timing.gate;
 
-  // ── TAXI ───────────────────────────────────────────────
-  // Build full taxi path: gate → wp1 → wp2 → ... → threshold
+  // ── TAXI (constant speed: 50 km/h → time proportional to distance) ──
   const taxiPath: RouteWaypoint[] = [
     route.gate,
     ...route.taxiWaypoints,
     route.runwayThreshold,
   ];
 
-  const numTaxiSegments = taxiPath.length - 1;
-  const segDuration = timing.taxi / numTaxiSegments;
+  const taxiSegDists: number[] = [];
+  for (let i = 0; i < taxiPath.length - 1; i++) {
+    taxiSegDists.push(waypointDistMeters(taxiPath[i], taxiPath[i + 1]));
+  }
+  const totalTaxiDist = taxiSegDists.reduce((a, b) => a + b, 0);
 
-  for (let seg = 0; seg < numTaxiSegments; seg++) {
+  let taxiCumDist = 0;
+  for (let seg = 0; seg < taxiPath.length - 1; seg++) {
     const from = taxiPath[seg];
     const to = taxiPath[seg + 1];
-    // 3 sub-samples per segment (start, mid, end) — skip start for seg > 0 to avoid duplicates
+    const segDist = taxiSegDists[seg];
+
     const subStart = seg === 0 ? 0 : 1;
     for (let sub = subStart; sub <= 3; sub++) {
       const frac = sub / 3;
-      const elapsed = t + seg * segDuration + frac * segDuration;
+      const distAtSub = taxiCumDist + frac * segDist;
+      const timeFrac = totalTaxiDist > 0 ? distAtSub / totalTaxiDist : 0;
+      const elapsed = t + timeFrac * timing.taxi;
       const lon = lerp(from.lon, to.lon, frac);
       const lat = lerp(from.lat, to.lat, frac);
       addSample(elapsed, lon, lat, elevation);
     }
+    taxiCumDist += segDist;
   }
   t += timing.taxi;
 
   // ── RUNWAY HOLD ────────────────────────────────────────
-  // Plane stops at threshold, pointing down the runway
   const firstRwyTarget = route.runwayWaypoints[0] ?? route.liftoffPoint;
   const rwyBearing = computeBearingRad(route.runwayThreshold, firstRwyTarget);
 
@@ -471,36 +681,36 @@ function buildRouteDeparture(
   }
   t += timing.runwayHold;
 
-  // ── TAKEOFF ROLL ───────────────────────────────────────
-  // Build runway path: threshold → rwyWp1 → rwyWp2 → ... → liftoff
+  // ── TAKEOFF ROLL (acceleration 0 → 300 km/h) ──────────
+  // For constant acceleration from rest: timeFrac = sqrt(distFrac)
   const rwyPath: RouteWaypoint[] = [
     route.runwayThreshold,
     ...route.runwayWaypoints,
     route.liftoffPoint,
   ];
 
-  const numRwySegments = rwyPath.length - 1;
-  // Use TAKEOFF_ROLL_TIMES for acceleration (or distribute evenly if fewer segments)
-  const rollTimes: number[] = [];
-  for (let i = 0; i < numRwySegments; i++) {
-    rollTimes.push(TAKEOFF_ROLL_TIMES[i] ?? TAKEOFF_ROLL_TIMES[TAKEOFF_ROLL_TIMES.length - 1]);
+  const rwySegDists: number[] = [];
+  for (let i = 0; i < rwyPath.length - 1; i++) {
+    rwySegDists.push(waypointDistMeters(rwyPath[i], rwyPath[i + 1]));
   }
-  const totalRollTime = rollTimes.reduce((s, t) => s + t, 0);
-  // Scale to fit actual timing.takeoff
-  const rollScale = timing.takeoff / totalRollTime;
+  const totalRwyDist = rwySegDists.reduce((a, b) => a + b, 0);
 
-  let rwyT = t;
-  for (let seg = 0; seg < numRwySegments; seg++) {
+  let rwyCumDist = 0;
+  for (let seg = 0; seg < rwyPath.length - 1; seg++) {
     const from = rwyPath[seg];
     const to = rwyPath[seg + 1];
-    const segTime = rollTimes[seg] * rollScale;
-    const isLastSegment = seg === numRwySegments - 1;
+    const segDist = rwySegDists[seg];
+    const isLastSegment = seg === rwyPath.length - 2;
 
-    // 4 sub-samples per segment for smooth acceleration
     const subStart = seg === 0 ? 0 : 1;
     for (let sub = subStart; sub <= 4; sub++) {
       const frac = sub / 4;
-      const elapsed = rwyT + frac * segTime;
+      const distAtSub = rwyCumDist + frac * segDist;
+      const distFrac = totalRwyDist > 0 ? distAtSub / totalRwyDist : 0;
+
+      // Constant acceleration from rest: time = totalTime · √(distFrac)
+      const elapsed = t + timing.takeoff * Math.sqrt(distFrac);
+
       const lon = lerp(from.lon, to.lon, frac);
       const lat = lerp(from.lat, to.lat, frac);
 
@@ -508,53 +718,20 @@ function buildRouteDeparture(
       let alt = elevation;
       if (isLastSegment && frac > 0.5) {
         const liftFrac = (frac - 0.5) / 0.5;
-        //alt = elevation + easeInQuad(liftFrac) * CLIMB_EXIT_ALT;
         alt = elevation + easeInQuad(liftFrac) * 50;
       }
 
       addSample(elapsed, lon, lat, alt);
     }
-    rwyT += segTime;
+    rwyCumDist += segDist;
   }
 }
 
-/**
- * Build samples for a generic heading-based departure.
- */
-function buildSimpleDeparture(
-  departure: Airport,
-  addSample: AddSampleFn,
-  timing: FlightTiming
-): void {
-  const hdgRad = Cesium.Math.toRadians(departure.runwayHeading);
-  const samples = 20;
-
-  for (let i = 0; i <= samples; i++) {
-    const frac = i / samples;
-    const elapsed = frac * timing.takeoff;
-    const dist = frac * 0.02; // degrees along heading
-    const lon = departure.lon + Math.sin(hdgRad) * dist;
-    const lat = departure.lat + Math.cos(hdgRad) * dist;
-
-    let alt: number;
-    if (frac < 0.4) {
-      alt = departure.elevation;
-    } else {
-      const liftFrac = (frac - 0.4) / 0.6;
-      alt = departure.elevation + easeInQuad(liftFrac) * CLIMB_EXIT_ALT;
-    }
-
-    addSample(elapsed, lon, lat, alt);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-// ARRIVAL BUILDER
-// ═══════════════════════════════════════════════════════════
+// ─── Build Route Arrival ────────────────────────────────────
 
 /**
  * Build samples for a route-based arrival: rollout → taxi to gate → gate hold.
- * Called after the landing phase ends (plane has touched down at touchdownPoint).
+ * Rollout decelerates from 300 → 50 km/h, taxi at constant 50 km/h.
  */
 function buildRouteArrival(
   route: ArrivalRoute,
@@ -565,56 +742,77 @@ function buildRouteArrival(
 ): void {
   let t = tStart;
 
-  // ── ROLLOUT (touchdown → rolloutWaypoints → runwayEnd) ──
+  // ── ROLLOUT (deceleration: 300 → 50 km/h) ────────────
   const rolloutPath: RouteWaypoint[] = [
     route.touchdownPoint,
     ...route.rolloutWaypoints,
     route.runwayEnd,
   ];
 
-  const numRolloutSegments = rolloutPath.length - 1;
-  const rolloutSegDuration = timing.rollout / numRolloutSegments;
+  const rollSegDists: number[] = [];
+  for (let i = 0; i < rolloutPath.length - 1; i++) {
+    rollSegDists.push(waypointDistMeters(rolloutPath[i], rolloutPath[i + 1]));
+  }
+  const totalRollDist = rollSegDists.reduce((a, b) => a + b, 0);
 
-  for (let seg = 0; seg < numRolloutSegments; seg++) {
+  let rollCumDist = 0;
+  for (let seg = 0; seg < rolloutPath.length - 1; seg++) {
     const from = rolloutPath[seg];
     const to = rolloutPath[seg + 1];
+    const segDist = rollSegDists[seg];
+
     const subStart = seg === 0 ? 0 : 1;
     for (let sub = subStart; sub <= 4; sub++) {
       const frac = sub / 4;
-      const elapsed = t + seg * rolloutSegDuration + frac * rolloutSegDuration;
+      const distAtSub = rollCumDist + frac * segDist;
+      const distFrac = totalRollDist > 0 ? distAtSub / totalRollDist : 0;
+
+      // Linear deceleration: use analytical time fraction
+      const timeFrac = linearSpeedTimeFrac(distFrac, LIFTOFF_SPEED_MS, MAX_GROUND_SPEED_MS);
+      const elapsed = t + timeFrac * timing.rollout;
+
       const lon = lerp(from.lon, to.lon, frac);
       const lat = lerp(from.lat, to.lat, frac);
       addSample(elapsed, lon, lat, elevation);
     }
+    rollCumDist += segDist;
   }
   t += timing.rollout;
 
-  // ── ARRIVAL TAXI (runwayEnd → taxiToGateWaypoints → gate) ──
+  // ── ARRIVAL TAXI (constant speed: 50 km/h) ────────────
   const taxiPath: RouteWaypoint[] = [
     route.runwayEnd,
     ...route.taxiToGateWaypoints,
     route.gate,
   ];
 
-  const numTaxiSegments = taxiPath.length - 1;
-  const taxiSegDuration = timing.arrivalTaxi / numTaxiSegments;
+  const taxiSegDists: number[] = [];
+  for (let i = 0; i < taxiPath.length - 1; i++) {
+    taxiSegDists.push(waypointDistMeters(taxiPath[i], taxiPath[i + 1]));
+  }
+  const totalTaxiDist = taxiSegDists.reduce((a, b) => a + b, 0);
 
-  for (let seg = 0; seg < numTaxiSegments; seg++) {
+  let taxiCumDist = 0;
+  for (let seg = 0; seg < taxiPath.length - 1; seg++) {
     const from = taxiPath[seg];
     const to = taxiPath[seg + 1];
+    const segDist = taxiSegDists[seg];
+
     const subStart = seg === 0 ? 0 : 1;
     for (let sub = subStart; sub <= 3; sub++) {
       const frac = sub / 3;
-      const elapsed = t + seg * taxiSegDuration + frac * taxiSegDuration;
+      const distAtSub = taxiCumDist + frac * segDist;
+      const timeFrac = totalTaxiDist > 0 ? distAtSub / totalTaxiDist : 0;
+      const elapsed = t + timeFrac * timing.arrivalTaxi;
       const lon = lerp(from.lon, to.lon, frac);
       const lat = lerp(from.lat, to.lat, frac);
       addSample(elapsed, lon, lat, elevation);
     }
+    taxiCumDist += segDist;
   }
   t += timing.arrivalTaxi;
 
-  // ── ARRIVAL GATE HOLD ─────────────────────────────────
-  // Tiny drift so VelocityOrientationProperty can compute heading
+  // ── ARRIVAL GATE HOLD ──────────────────────────────────
   const lastTaxiPoint = route.taxiToGateWaypoints[route.taxiToGateWaypoints.length - 1] ?? route.runwayEnd;
   const gateBearing = computeBearingRad(lastTaxiPoint, route.gate);
   const DRIFT = 0.0000005;
@@ -631,7 +829,7 @@ function buildRouteArrival(
   }
 }
 
-// ─── Math helpers ───────────────────────────────────────────
+// ─── Math Helpers ───────────────────────────────────────────
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;

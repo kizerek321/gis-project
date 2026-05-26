@@ -14,15 +14,11 @@ import { initScene } from "./scene";
 import { planFlight, createFlight } from "./flight";
 import type { FlightResult, FlightPhase } from "./flight";
 
-// ─── State ──────────────────────────────────────────────────
-
 let viewer: Cesium.Viewer;
 let currentFlight: FlightResult | null = null;
 let phaseUpdateInterval: number | null = null;
 let arrivalTimeout: number | null = null;
 let cameraTickListener: Cesium.Event.RemoveCallback | null = null;
-
-// ─── DOM References ─────────────────────────────────────────
 
 const departureSelect = document.getElementById("departureSelect") as HTMLSelectElement;
 const destinationSelect = document.getElementById("destinationSelect") as HTMLSelectElement;
@@ -36,8 +32,8 @@ const phaseText = document.getElementById("phaseText") as HTMLSpanElement;
 const speedControls = document.getElementById("speedControls") as HTMLDivElement;
 const cancelButton = document.getElementById("cancelButton") as HTMLButtonElement;
 const infoSpeed = document.getElementById("infoSpeed") as HTMLSpanElement;
+const infoAltitude = document.getElementById("infoAltitude") as HTMLSpanElement;
 
-// ─── Initialize ─────────────────────────────────────────────
 
 function init(): void {
   viewer = initScene("cesiumContainer");
@@ -45,7 +41,7 @@ function init(): void {
   populateDropdowns();
   wireEvents();
 
-  // Set initial camera to a nice globe view
+  // Set initial camera to a globe view
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(18.4661, 54.3776, 15000000),
     orientation: {
@@ -155,20 +151,25 @@ function startFlight(): void {
 
   if (pos1 && pos2) {
     const distanceMeters = Cesium.Cartesian3.distance(pos1, pos2);
-    // Przeliczenie m/s na km/h
-    infoSpeed.textContent = `${Math.round(distanceMeters * 3.6)} km/h`;
+    const speedKmh = Math.round(distanceMeters * 3.6 );
+    infoSpeed.textContent = `${speedKmh} km/h`;
   } else {
     infoSpeed.textContent = "0 km/h";
   }
-  });
 
-  // Camera setup: route-based or simple
-  //if (currentFlight.departureCamera) {
-  //  startDepartureChoreography(currentFlight);
-  //} else {
-  //  // Simple: immediately track the entity
-  //  viewer.trackedEntity = currentFlight.entity;
-  //}
+  // Altitude display
+  if (pos1) {
+    const carto = Cesium.Cartographic.fromCartesian(pos1);
+    const altMeters = Math.max(0, Math.round(carto.height));
+    if (altMeters >= 1000) {
+      infoAltitude.textContent = `${(altMeters / 1000).toFixed(1)} km`;
+    } else {
+      infoAltitude.textContent = `${altMeters} m`;
+    }
+  } else {
+    infoAltitude.textContent = "0 m";
+  }
+  });
 
   viewer.trackedEntity = currentFlight.entity;
 
@@ -206,7 +207,7 @@ function startDepartureChoreography(flight: FlightResult): void {
   const heading = cam.initialHeading;
   const gateHoldTime = flight.plan.timing.gate;
 
-  // ── 1. Position camera in FRONT of the plane ──────────
+  // 1. Position camera in FRONT of the plane
   // Camera ahead of the plane (in the direction the plane faces), looking back
   const FRONT_DIST = 50;  // meters ahead
   const FRONT_ALT = 8;    // meters above ground
@@ -225,7 +226,7 @@ function startDepartureChoreography(flight: FlightResult): void {
     },
   });
 
-  // ── 2. Use clock tick to transition camera at the right sim time ──
+  // 2. Use clock tick to transition camera at the right sim time
   let choreographyState: "front" | "transitioning" | "tracking" = "front";
 
   cameraTickListener = viewer.clock.onTick.addEventListener((clock) => {
@@ -267,7 +268,7 @@ function startDepartureChoreography(flight: FlightResult): void {
   });
 }
 
-// ─── Phase tracking ─────────────────────────────────────────
+// Phase tracking 
 
 function startPhaseTracking(): void {
   if (phaseUpdateInterval !== null) {
@@ -334,7 +335,7 @@ function updatePhaseUI(phase: FlightPhase): void {
   phaseIndicator.classList.add("phase-pulse");
 }
 
-// ─── Arrival handling ───────────────────────────────────────
+// Arrival handling
 
 function handleArrival(): void {
   console.log("Flight arrived!");
@@ -345,10 +346,10 @@ function handleArrival(): void {
   // Stay on parked plane for 10 seconds, then reset
   arrivalTimeout = window.setTimeout(() => {
     resetFlight();
-  }, 10000);
+  }, 5000);
 }
 
-// ─── Reset / Cancel flight ──────────────────────────────────
+// Reset / Cancel flight
 
 function resetFlight(): void {
   cleanupFlight();
@@ -399,7 +400,5 @@ function cleanupFlight(): void {
 
   currentFlight = null;
 }
-
-// ─── Boot ───────────────────────────────────────────────────
 
 init();

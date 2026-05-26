@@ -28,7 +28,6 @@ export function initScene(containerId: string): Cesium.Viewer {
     selectionIndicator: false,
   });
 
-  // Load Cesium World Terrain for realistic ground
   setupTerrain();
 
   // Atmosphere & lighting
