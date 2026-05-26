@@ -52,7 +52,7 @@ function init(): void {
   });
 }
 
-// ─── Populate airport dropdowns ─────────────────────────────
+//  Populate airport dropdowns 
 
 function populateDropdowns(): void {
   const sorted = [...AIRPORTS].sort((a, b) => a.city.localeCompare(b.city));
@@ -91,6 +91,7 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const speed = parseFloat((btn as HTMLElement).dataset.speed || "1");
       if (viewer) {
+        // here we increase the speed of the simulation
         viewer.clock.multiplier = speed;
       }
       document.querySelectorAll("[data-speed]").forEach((b) => b.classList.remove("active"));
@@ -191,81 +192,6 @@ function startFlight(): void {
   console.log(
     `Flight started: ${dep.city} → ${dest.city} (${Math.round(plan.distanceKm)} km, ${Math.round(plan.totalDuration)}s)`
   );
-}
-
-// ─── Departure Camera Choreography ──────────────────────────
-
-/**
- * Manages camera during gate hold and taxi phases:
- * 1. Camera looks at the FRONT of the plane for gateHoldTime seconds
- * 2. Camera flies to the REAR of the plane over 2 seconds
- * 3. Switches to entity tracking for the rest of the flight
- */
-function startDepartureChoreography(flight: FlightResult): void {
-  const cam = flight.departureCamera!;
-  const elev = flight.plan.departure.elevation;
-  const heading = cam.initialHeading;
-  const gateHoldTime = flight.plan.timing.gate;
-
-  // 1. Position camera in FRONT of the plane
-  // Camera ahead of the plane (in the direction the plane faces), looking back
-  const FRONT_DIST = 50;  // meters ahead
-  const FRONT_ALT = 8;    // meters above ground
-  const metersPerDegLat = 111320;
-  const metersPerDegLon = 111320 * Math.cos(cam.gatePosition.lat * Math.PI / 180);
-
-  const frontLat = cam.gatePosition.lat + (FRONT_DIST * Math.cos(heading)) / metersPerDegLat;
-  const frontLon = cam.gatePosition.lon + (FRONT_DIST * Math.sin(heading)) / metersPerDegLon;
-
-  viewer.camera.setView({
-    destination: Cesium.Cartesian3.fromDegrees(frontLon, frontLat, elev + FRONT_ALT),
-    orientation: {
-      heading: (heading + Math.PI) % (2 * Math.PI), // looking back toward the plane
-      pitch: Cesium.Math.toRadians(-8),
-      roll: 0,
-    },
-  });
-
-  // 2. Use clock tick to transition camera at the right sim time
-  let choreographyState: "front" | "transitioning" | "tracking" = "front";
-
-  cameraTickListener = viewer.clock.onTick.addEventListener((clock) => {
-    if (!currentFlight) return;
-    const elapsed = Cesium.JulianDate.secondsDifference(clock.currentTime, flight.startTime);
-
-    if (choreographyState === "front" && elapsed >= gateHoldTime) {
-      choreographyState = "transitioning";
-
-      // ── Fly camera to BEHIND the plane ────────────────
-      const REAR_DIST = 80;  // meters behind
-      const REAR_ALT = 30;   // meters above ground
-
-      const rearLat = cam.gatePosition.lat - (REAR_DIST * Math.cos(heading)) / metersPerDegLat;
-      const rearLon = cam.gatePosition.lon - (REAR_DIST * Math.sin(heading)) / metersPerDegLon;
-
-      viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(rearLon, rearLat, elev + REAR_ALT),
-        orientation: {
-          heading: heading, // looking toward the plane (in its forward direction)
-          pitch: Cesium.Math.toRadians(-15),
-          roll: 0,
-        },
-        duration: 2,
-        complete: () => {
-          choreographyState = "tracking";
-          // Switch to tracked entity for the rest of the flight
-          if (currentFlight) {
-            viewer.trackedEntity = currentFlight.entity;
-          }
-          // Remove this listener
-          if (cameraTickListener) {
-            cameraTickListener();
-            cameraTickListener = null;
-          }
-        },
-      });
-    }
-  });
 }
 
 // Phase tracking 

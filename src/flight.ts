@@ -78,10 +78,10 @@ export const LIFTOFF_SPEED_KMH = 300;
 export const CLIMB_MID_SPEED_KMH = 450;
 
 // Speed constants (m/s)
-const MAX_SPEED_MS = MAX_SPEED_KMH / 3.6;            // 250 m/s
-const MAX_GROUND_SPEED_MS = MAX_GROUND_SPEED_KMH / 3.6;  // ~13.9 m/s
-const LIFTOFF_SPEED_MS = LIFTOFF_SPEED_KMH / 3.6;    // ~83.3 m/s
-const CLIMB_MID_SPEED_MS = CLIMB_MID_SPEED_KMH / 3.6;    // ~125 m/s
+const MAX_SPEED_MS = MAX_SPEED_KMH / 3.6;            
+const MAX_GROUND_SPEED_MS = MAX_GROUND_SPEED_KMH / 3.6;  
+const LIFTOFF_SPEED_MS = LIFTOFF_SPEED_KMH / 3.6;    
+const CLIMB_MID_SPEED_MS = CLIMB_MID_SPEED_KMH / 3.6;   
 
 // Altitude thresholds (AGL — meters above ground level)
 const SPEED_RAMP_START_AGL = 400;    // Below: liftoff speed (300 km/h)
@@ -123,7 +123,7 @@ function getSpeedForAltitude(altitude: number, groundElev: number): number {
   return MAX_SPEED_MS;
 }
 
-// ─── Distance Helpers ───────────────────────────────────────
+//Distance Helpers
 
 /** Haversine distance between two waypoints in meters. */
 function waypointDistMeters(a: RouteWaypoint, b: RouteWaypoint): number {
@@ -152,7 +152,7 @@ function haversineDistMeters(lat1: number, lon1: number, lat2: number, lon2: num
   return waypointDistMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
 }
 
-// ─── Variable-Speed Timing ──────────────────────────────────
+// Variable-Speed Timing 
 
 /**
  * Compute total time (seconds) to traverse a path with altitude-dependent speed.
