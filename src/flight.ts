@@ -389,8 +389,8 @@ export function createFlight(
   // Build sampled position
   const position = new Cesium.SampledPositionProperty();
   position.setInterpolationOptions({
-    interpolationDegree: 1,
-    interpolationAlgorithm: Cesium.LinearApproximation,
+    interpolationDegree: 3, 
+    interpolationAlgorithm: Cesium.HermitePolynomialApproximation,
   });
 
   const elev = departure.elevation;
@@ -465,19 +465,53 @@ export function createFlight(
   // ── ROUTE-BASED DEPARTURE ────────────────────────────────
   buildRouteDeparture(departureRoute!, elev, addSample, timing);
 
-  // ── CLIMB (liftoff → 3000m AGL, straight from runway heading) ──
+  // ── TRANSITION 1 (Climb -> Cruise) PRECALCULATIONS ────────
   const climbSamples = 100;
   const climbHorizDistM = haversineDistMeters(liftoffLat, liftoffLon, climbExitLat, climbExitLon);
   const climbCumTimes = computeCumulativeTimes(
     climbHorizDistM, climbStartAlt, climbEndAlt, elev, climbSamples
   );
 
+  const t_trans1Start = t_takeoffEnd + climbCumTimes[Math.floor(climbSamples * 0.8)];
+  const t_trans1End = t_climbEnd + 0.05 * timing.cruise;
+
+  // P0 is at climb at 80% distance / progress
+  const p1_0 = {
+    lon: lerp(liftoffLon, climbExitLon, 0.8),
+    lat: lerp(liftoffLat, climbExitLat, 0.8),
+    alt: lerp(climbStartAlt, climbEndAlt, 0.8)
+  };
+  // P1 is the intersection (control point)
+  const p1_1 = {
+    lon: climbExitLon,
+    lat: climbExitLat,
+    alt: climbEndAlt
+  };
+  // P2 is at 5% of cruise along the great circle
+  const p1_2_gcFrac = lerp(0.0, 0.80, 0.05);
+  const p1_2_interp = geodesic.interpolateUsingFraction(p1_2_gcFrac);
+  const p1_2 = {
+    lon: Cesium.Math.toDegrees(p1_2_interp.longitude),
+    lat: Cesium.Math.toDegrees(p1_2_interp.latitude),
+    alt: lerp(climbEndAlt, CRUISE_ALTITUDE, 0.05 / 0.1)
+  };
+
+  // ── CLIMB (liftoff → 3000m AGL, straight from runway heading) ──
   for (let i = 0; i <= climbSamples; i++) {
     const frac = i / climbSamples;
     const elapsed = t_takeoffEnd + climbCumTimes[i];
-    const lon = lerp(liftoffLon, climbExitLon, frac);
-    const lat = lerp(liftoffLat, climbExitLat, frac);
-    const alt = lerp(climbStartAlt, climbEndAlt, frac);
+    let lon = lerp(liftoffLon, climbExitLon, frac);
+    let lat = lerp(liftoffLat, climbExitLat, frac);
+    let alt = lerp(climbStartAlt, climbEndAlt, frac);
+
+    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
+      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
+      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
+      lon = bezier.lon;
+      lat = bezier.lat;
+      alt = bezier.alt;
+    }
+
     addSample(elapsed, lon, lat, alt);
   }
 
@@ -489,8 +523,8 @@ export function createFlight(
 
     const gcFrac = lerp(0.0, 0.80, frac); // Cover 0% to 80% of the route
     const interp = geodesic.interpolateUsingFraction(gcFrac);
-    const lon = Cesium.Math.toDegrees(interp.longitude);
-    const lat = Cesium.Math.toDegrees(interp.latitude);
+    let lon = Cesium.Math.toDegrees(interp.longitude);
+    let lat = Cesium.Math.toDegrees(interp.latitude);
 
     let alt = CRUISE_ALTITUDE;
     if (frac < 0.1) {
@@ -498,8 +532,52 @@ export function createFlight(
       alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / 0.1);
     }
 
+    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
+      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
+      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
+      lon = bezier.lon;
+      lat = bezier.lat;
+      alt = bezier.alt;
+    }
+
     addSample(elapsed, lon, lat, alt);
   }
+
+  // ── TRANSITION 2 (Descent -> Landing) PRECALCULATIONS ─────
+  const landingSamples = 100;
+  const approachHorizDistM = haversineDistMeters(
+    approachEntryLat, approachEntryLon,
+    landingTargetLat, landingTargetLon
+  );
+  const landingCumTimes = computeCumulativeTimes(
+    approachHorizDistM, approachEntryAlt, landingTargetElev, destElev, landingSamples, easeOutQuad
+  );
+
+  const t_trans2Start = t_cruiseEnd + 0.95 * timing.descent;
+  const t_trans2End = t_descentEnd + landingCumTimes[Math.floor(landingSamples * 0.2)];
+
+  // P0 is at 95% of descent along the great circle
+  const p2_0_gcFrac = lerp(0.80, 1.0, 0.95);
+  const p2_0_interp = geodesic.interpolateUsingFraction(p2_0_gcFrac);
+  const p2_0 = {
+    lon: Cesium.Math.toDegrees(p2_0_interp.longitude),
+    lat: Cesium.Math.toDegrees(p2_0_interp.latitude),
+    alt: lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(0.95))
+  };
+
+  // P1 is the intersection (control point)
+  const p2_1 = {
+    lon: approachEntryLon,
+    lat: approachEntryLat,
+    alt: approachEntryAlt
+  };
+
+  // P2 is at 20% of landing approach
+  const p2_2 = {
+    lon: lerp(approachEntryLon, landingTargetLon, 0.2),
+    lat: lerp(approachEntryLat, landingTargetLat, 0.2),
+    alt: lerp(approachEntryAlt, landingTargetElev, easeOutQuad(0.2))
+  };
 
   // ── DESCENT (cruise → approach altitude) ─────────────────
   const descentSamples = 100;
@@ -510,29 +588,37 @@ export function createFlight(
     // Finish the remaining 20% of the great circle route
     const gcFrac = lerp(0.80, 1.0, frac);
     const interp = geodesic.interpolateUsingFraction(gcFrac);
-    const lon = Cesium.Math.toDegrees(interp.longitude);
-    const lat = Cesium.Math.toDegrees(interp.latitude);
-    const alt = lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(frac));
+    let lon = Cesium.Math.toDegrees(interp.longitude);
+    let lat = Cesium.Math.toDegrees(interp.latitude);
+    let alt = lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(frac));
+
+    if (elapsed >= t_trans2Start && elapsed <= t_trans2End) {
+      const u = (elapsed - t_trans2Start) / (t_trans2End - t_trans2Start);
+      const bezier = getBezierPosition(p2_0, p2_1, p2_2, u);
+      lon = bezier.lon;
+      lat = bezier.lat;
+      alt = bezier.alt;
+    }
 
     addSample(elapsed, lon, lat, alt);
   }
 
   // ── LANDING (approach → touchdown, with speed profile) ───
-  const landingSamples = 100;
-  const approachHorizDistM = haversineDistMeters(
-    approachEntryLat, approachEntryLon,
-    landingTargetLat, landingTargetLon
-  );
-  const landingCumTimes = computeCumulativeTimes(
-    approachHorizDistM, approachEntryAlt, landingTargetElev, destElev, landingSamples, easeOutQuad
-  );
-
   for (let i = 0; i <= landingSamples; i++) {
     const frac = i / landingSamples;
     const elapsed = t_descentEnd + landingCumTimes[i];
-    const lon = lerp(approachEntryLon, landingTargetLon, frac);
-    const lat = lerp(approachEntryLat, landingTargetLat, frac);
-    const alt = lerp(approachEntryAlt, landingTargetElev, easeOutQuad(frac));
+    let lon = lerp(approachEntryLon, landingTargetLon, frac);
+    let lat = lerp(approachEntryLat, landingTargetLat, frac);
+    let alt = lerp(approachEntryAlt, landingTargetElev, easeOutQuad(frac));
+
+    if (elapsed >= t_trans2Start && elapsed <= t_trans2End) {
+      const u = (elapsed - t_trans2Start) / (t_trans2End - t_trans2Start);
+      const bezier = getBezierPosition(p2_0, p2_1, p2_2, u);
+      lon = bezier.lon;
+      lat = bezier.lat;
+      alt = bezier.alt;
+    }
+
     addSample(elapsed, lon, lat, alt);
   }
 
@@ -830,6 +916,20 @@ function buildRouteArrival(
 }
 
 // ─── Math Helpers ───────────────────────────────────────────
+
+function getBezierPosition(
+  p0: { lon: number; lat: number; alt: number },
+  p1: { lon: number; lat: number; alt: number },
+  p2: { lon: number; lat: number; alt: number },
+  u: number
+) {
+  const mu = 1 - u;
+  return {
+    lon: mu * mu * p0.lon + 2 * mu * u * p1.lon + u * u * p2.lon,
+    lat: mu * mu * p0.lat + 2 * mu * u * p1.lat + u * u * p2.lat,
+    alt: mu * mu * p0.alt + 2 * mu * u * p1.alt + u * u * p2.alt,
+  };
+}
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
