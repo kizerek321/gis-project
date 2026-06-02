@@ -187,38 +187,6 @@ function computeVariableSpeedDuration(
 }
 
 /**
- * Compute cumulative time at each of `samples+1` evenly-spaced path positions.
- * Returns array of length `samples+1` with cumTimes[0]=0.
- */
-function computeCumulativeTimes(
-  horizDistM: number,
-  startAlt: number,
-  endAlt: number,
-  groundElev: number,
-  samples: number,
-  easeFn: (t: number) => number = (t) => t
-): number[] {
-  const cumTimes: number[] = [0];
-  for (let i = 1; i <= samples; i++) {
-    const f0 = (i - 1) / samples;
-    const f1 = i / samples;
-    const fMid = (f0 + f1) / 2;
-
-    const alt0 = lerp(startAlt, endAlt, easeFn(f0));
-    const alt1 = lerp(startAlt, endAlt, easeFn(f1));
-    const altMid = lerp(startAlt, endAlt, easeFn(fMid));
-
-    const segHorizDist = horizDistM / samples;
-    const altChange = alt1 - alt0;
-    const segDist = Math.sqrt(segHorizDist * segHorizDist + altChange * altChange);
-
-    const speed = getSpeedForAltitude(altMid, groundElev);
-    cumTimes.push(cumTimes[i - 1] + segDist / speed);
-  }
-  return cumTimes;
-}
-
-/**
  * For a linear speed ramp (v0 → v1) over a distance, compute the fraction
  * of total time elapsed at a given fraction of total distance.
  *
@@ -401,12 +369,12 @@ export function createFlight(
   const t_taxiEnd = t_gateEnd + timing.taxi;
   const t_holdEnd = t_taxiEnd + timing.runwayHold;
   const t_takeoffEnd = t_holdEnd + timing.takeoff;
-  const t_climbEnd = t_takeoffEnd + timing.climb;
-  const t_cruiseEnd = t_climbEnd + timing.cruise;
-  const t_descentEnd = t_cruiseEnd + timing.descent;
-  const t_landingEnd = t_descentEnd + timing.landing;
-  const t_rolloutEnd = t_landingEnd + timing.rollout;
-  const t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
+  let t_climbEnd = t_takeoffEnd + timing.climb;        // updated after climb sim
+  let t_cruiseEnd = t_climbEnd + timing.cruise;
+  let t_descentEnd = t_cruiseEnd + timing.descent;
+  let t_landingEnd = t_descentEnd + timing.landing;    // updated after landing sim
+  let t_rolloutEnd = t_landingEnd + timing.rollout;
+  let t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
   // t_arrivalGateEnd = totalDuration
 
   // ── Determine liftoff position & runway heading ────────
@@ -424,10 +392,6 @@ export function createFlight(
     liftoffLon = departure.lon + Math.sin(runwayHeadingRad) * 0.02;
     liftoffLat = departure.lat + Math.cos(runwayHeadingRad) * 0.02;
   }
-
-  // Climb exit — straight ahead from runway heading
-  const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
-  const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
 
   // Dynamic altitude thresholds (AGL-based)
   const climbStartAlt = elev + 50;
@@ -451,11 +415,8 @@ export function createFlight(
   const approachEntryLon = landingTargetLon + Math.sin(destHeadingRad) * APPROACH_DISTANCE_DEG;
   const approachEntryLat = landingTargetLat + Math.cos(destHeadingRad) * APPROACH_DISTANCE_DEG;
 
-  const climbExitCartographic = Cesium.Cartographic.fromDegrees(climbExitLon, climbExitLat);
+  // Approach entry cartographic — the ILS cone entry point (~27 km before touchdown)
   const approachEntryCartographic = Cesium.Cartographic.fromDegrees(approachEntryLon, approachEntryLat);
-
-  // Great circle connects the climb exit to the approach entry point
-  const geodesic = new Cesium.EllipsoidGeodesic(climbExitCartographic, approachEntryCartographic);
 
   function addSample(elapsed: number, lon: number, lat: number, alt: number): void {
     const time = Cesium.JulianDate.addSeconds(start, elapsed, new Cesium.JulianDate());
@@ -465,162 +426,92 @@ export function createFlight(
   // ── ROUTE-BASED DEPARTURE ────────────────────────────────
   buildRouteDeparture(departureRoute!, elev, addSample, timing);
 
-  // ── TRANSITION 1 (Climb -> Cruise) PRECALCULATIONS ────────
-  const climbSamples = 1000;
-  const climbHorizDistM = haversineDistMeters(liftoffLat, liftoffLon, climbExitLat, climbExitLon);
-  const climbCumTimes = computeCumulativeTimes(
-    climbHorizDistM, climbStartAlt, climbEndAlt, elev, climbSamples
+  // ── CLIMB (rate-limited turn, 3°/s Standard Rate Turn) ───
+  // Steers toward approachEntry each step; the aircraft naturally sweeps a
+  // wide arc without any sudden course change after liftoff.
+  const climbResult = buildClimbWithTurn(
+    liftoffLon, liftoffLat,
+    runwayHeadingRad,
+    elev,
+    climbStartAlt, climbEndAlt,
+    approachEntryLon, approachEntryLat,
+    t_takeoffEnd,
+    timing.climb,
+    addSample
   );
+  // Synchronise all downstream phase boundaries with actual climb duration
+  t_climbEnd = t_takeoffEnd + climbResult.actualDuration;
+  t_cruiseEnd = t_climbEnd + timing.cruise;
+  t_descentEnd = t_cruiseEnd + timing.descent;
+  t_landingEnd = t_descentEnd + timing.landing;
+  t_rolloutEnd = t_landingEnd + timing.rollout;
+  t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
 
-  const t_trans1Start = t_takeoffEnd + climbCumTimes[Math.floor(climbSamples * 0.95)];
-  const t_trans1End = t_climbEnd + 0.05 * timing.cruise;
+  // Great circle from actual climb-end position to approach entry
+  const climbEndCartographic = Cesium.Cartographic.fromDegrees(climbResult.endLon, climbResult.endLat);
+  const geodesic = new Cesium.EllipsoidGeodesic(climbEndCartographic, approachEntryCartographic);
 
-  // P0 is at climb at 80% distance / progress
-  const p1_0 = {
-    lon: lerp(liftoffLon, climbExitLon, 0.95),
-    lat: lerp(liftoffLat, climbExitLat, 0.95),
-    alt: lerp(climbStartAlt, climbEndAlt, 0.95)
-  };
-  // P1 is the intersection (control point)
-  const p1_1 = {
-    lon: climbExitLon,
-    lat: climbExitLat,
-    alt: climbEndAlt
-  };
-  // P2 is at 5% of cruise along the great circle
-  const p1_2_gcFrac = lerp(0.0, 0.80, 0.05);
-  const p1_2_interp = geodesic.interpolateUsingFraction(p1_2_gcFrac);
-  const p1_2 = {
-    lon: Cesium.Math.toDegrees(p1_2_interp.longitude),
-    lat: Cesium.Math.toDegrees(p1_2_interp.latitude),
-    alt: lerp(climbEndAlt, CRUISE_ALTITUDE, 0.05 / 0.1)
-  };
-
-  // ── CLIMB (liftoff → 3000m AGL, straight from runway heading) ──
-  for (let i = 0; i <= climbSamples; i++) {
-    const frac = i / climbSamples;
-    const elapsed = t_takeoffEnd + climbCumTimes[i];
-    let lon = lerp(liftoffLon, climbExitLon, frac);
-    let lat = lerp(liftoffLat, climbExitLat, frac);
-    let alt = lerp(climbStartAlt, climbEndAlt, frac);
-
-    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
-      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
-      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
-    }
-
-    addSample(elapsed, lon, lat, alt);
-  }
-
-  // ── CRUISE (great circle at altitude) ────────────────────
+  // ── CRUISE (great circle at cruise altitude) ──────────────
   const cruiseSamples = 1000;
   for (let i = 0; i <= cruiseSamples; i++) {
     const frac = i / cruiseSamples;
     const elapsed = t_climbEnd + frac * timing.cruise;
 
-    const gcFrac = lerp(0.0, 0.80, frac); // Cover 0% to 80% of the route
+    const gcFrac = lerp(0.0, 0.80, frac); // covers 0–80% of geodesic
     const interp = geodesic.interpolateUsingFraction(gcFrac);
-    let lon = Cesium.Math.toDegrees(interp.longitude);
-    let lat = Cesium.Math.toDegrees(interp.latitude);
+    const lon = Cesium.Math.toDegrees(interp.longitude);
+    const lat = Cesium.Math.toDegrees(interp.latitude);
 
     let alt = CRUISE_ALTITUDE;
     if (frac < 0.1) {
-      // Initial climb from climbEndAlt to CRUISE_ALTITUDE
+      // Continue climb from 3 000 m AGL to cruise altitude in first 10% of cruise
       alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / 0.1);
-    }
-
-    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
-      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
-      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
     }
 
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ── TRANSITION 2 (Descent -> Landing) PRECALCULATIONS ─────
-  const landingSamples = 100;
-  const approachHorizDistM = haversineDistMeters(
-    approachEntryLat, approachEntryLon,
-    landingTargetLat, landingTargetLon
-  );
-  const landingCumTimes = computeCumulativeTimes(
-    approachHorizDistM, approachEntryAlt, landingTargetElev, destElev, landingSamples, easeOutQuad
-  );
-
-  const t_trans2Start = t_cruiseEnd + 0.85 * timing.descent;
-  const t_trans2End = t_descentEnd + landingCumTimes[Math.floor(landingSamples * 0.2)];
-
-  // P0 is at 95% of descent along the great circle
-  const p2_0_gcFrac = lerp(0.80, 1.0, 0.85);
-  const p2_0_interp = geodesic.interpolateUsingFraction(p2_0_gcFrac);
-  const p2_0 = {
-    lon: Cesium.Math.toDegrees(p2_0_interp.longitude),
-    lat: Cesium.Math.toDegrees(p2_0_interp.latitude),
-    alt: lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(0.85))
-  };
-
-  // P1 is the intersection (control point)
-  const p2_1 = {
-    lon: approachEntryLon,
-    lat: approachEntryLat,
-    alt: approachEntryAlt
-  };
-
-  // P2 is at 20% of landing approach
-  const p2_2 = {
-    lon: lerp(approachEntryLon, landingTargetLon, 0.2),
-    lat: lerp(approachEntryLat, landingTargetLat, 0.2),
-    alt: lerp(approachEntryAlt, landingTargetElev, easeOutQuad(0.2))
-  };
-
-  // ── DESCENT (cruise → approach altitude) ─────────────────
-  const descentSamples = 100;
+  // ── DESCENT (cruise altitude → approach altitude) ─────────
+  const descentSamples = 200;
   for (let i = 0; i <= descentSamples; i++) {
     const frac = i / descentSamples;
     const elapsed = t_cruiseEnd + frac * timing.descent;
 
-    // Finish the remaining 20% of the great circle route
+    // Covers the last 20% of the geodesic (80% → 100%), ending at approachEntry
     const gcFrac = lerp(0.80, 1.0, frac);
     const interp = geodesic.interpolateUsingFraction(gcFrac);
-    let lon = Cesium.Math.toDegrees(interp.longitude);
-    let lat = Cesium.Math.toDegrees(interp.latitude);
-    let alt = lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(frac));
-
-    if (elapsed >= t_trans2Start && elapsed <= t_trans2End) {
-      const u = (elapsed - t_trans2Start) / (t_trans2End - t_trans2Start);
-      const bezier = getBezierPosition(p2_0, p2_1, p2_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
-    }
+    const lon = Cesium.Math.toDegrees(interp.longitude);
+    const lat = Cesium.Math.toDegrees(interp.latitude);
+    const alt = lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(frac));
 
     addSample(elapsed, lon, lat, alt);
   }
 
-  // ── LANDING (approach → touchdown, with speed profile) ───
-  for (let i = 0; i <= landingSamples; i++) {
-    const frac = i / landingSamples;
-    const elapsed = t_descentEnd + landingCumTimes[i];
-    let lon = lerp(approachEntryLon, landingTargetLon, frac);
-    let lat = lerp(approachEntryLat, landingTargetLat, frac);
-    let alt = lerp(approachEntryAlt, landingTargetElev, easeOutQuad(frac));
+  // Geodesic heading at approachEntry — tangent direction at 99.9% → 100%
+  const gc999 = geodesic.interpolateUsingFraction(0.999);
+  const gc100 = geodesic.interpolateUsingFraction(1.0);
+  const approachInitialHeading = computeBearingRad(
+    { lat: Cesium.Math.toDegrees(gc999.latitude), lon: Cesium.Math.toDegrees(gc999.longitude) },
+    { lat: Cesium.Math.toDegrees(gc100.latitude),  lon: Cesium.Math.toDegrees(gc100.longitude)  }
+  );
 
-    if (elapsed >= t_trans2Start && elapsed <= t_trans2End) {
-      const u = (elapsed - t_trans2Start) / (t_trans2End - t_trans2Start);
-      const bezier = getBezierPosition(p2_0, p2_1, p2_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
-    }
-
-    addSample(elapsed, lon, lat, alt);
-  }
+  // ── LANDING (rate-limited turn, 3°/s Standard Rate Turn) ─
+  // Starts at approachEntry with the geodesic arrival heading and turns
+  // smoothly onto the runway centerline — no speed penalty.
+  const landingResult = buildApproachWithTurn(
+    approachEntryLon, approachEntryLat,
+    approachEntryAlt,
+    approachInitialHeading,
+    landingTargetLon, landingTargetLat,
+    landingTargetElev,
+    t_descentEnd,
+    timing.landing,
+    addSample
+  );
+  // Update landing boundary with actual approach simulation duration
+  t_landingEnd = t_descentEnd + landingResult.actualDuration;
+  t_rolloutEnd = t_landingEnd + timing.rollout;
+  t_arrivalTaxiEnd = t_rolloutEnd + timing.arrivalTaxi;
 
   // ── ARRIVAL (rollout → taxi → gate) ──────────────────────
   if (arrivalRoute) {
@@ -915,21 +806,6 @@ function buildRouteArrival(
   }
 }
 
-// ─── Math Helpers ───────────────────────────────────────────
-
-function getBezierPosition(
-  p0: { lon: number; lat: number; alt: number },
-  p1: { lon: number; lat: number; alt: number },
-  p2: { lon: number; lat: number; alt: number },
-  u: number
-) {
-  const mu = 1 - u;
-  return {
-    lon: mu * mu * p0.lon + 2 * mu * u * p1.lon + u * u * p2.lon,
-    lat: mu * mu * p0.lat + 2 * mu * u * p1.lat + u * u * p2.lat,
-    alt: mu * mu * p0.alt + 2 * mu * u * p1.alt + u * u * p2.alt,
-  };
-}
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -954,4 +830,175 @@ function computeBearingRad(from: RouteWaypoint, to: RouteWaypoint): number {
   const y = Math.sin(dLon) * Math.cos(lat2);
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
   return (Math.atan2(y, x) + 2 * Math.PI) % (2 * Math.PI);
+}
+
+// ─── Rate-Limited Turn Simulation ───────────────────────────
+
+interface TurnSimResult {
+  endLon: number;
+  endLat: number;
+  endAlt: number;
+  endHeading: number;
+  actualDuration: number;
+}
+
+const SIM_DT = 0.5;                                     // seconds per simulation step
+const MAX_TURN_RATE_RAD = Cesium.Math.toRadians(3);     // 3°/s — Standard Rate Turn
+
+/**
+ * Clamp a heading change to ±maxStep using shortest-path normalization.
+ * Ensures the aircraft always turns in the shorter direction.
+ */
+function clampAngleChange(current: number, target: number, maxStep: number): number {
+  let diff = target - current;
+  // Normalize to [-PI, PI] for shortest-path turn direction
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  if (Math.abs(diff) <= maxStep) return target;
+  return current + Math.sign(diff) * maxStep;
+}
+
+/**
+ * Move a lat/lon position `distMeters` in direction `headingRad`
+ * (North = 0, East = PI/2) using the spherical Earth model.
+ */
+function moveWithHeading(
+  lon: number, lat: number,
+  headingRad: number, distMeters: number
+): { lon: number; lat: number } {
+  const R = 6371000;
+  const latRad = lat * Math.PI / 180;
+  const lonRad = lon * Math.PI / 180;
+  const angDist = distMeters / R;
+  const newLat = Math.asin(
+    Math.sin(latRad) * Math.cos(angDist) +
+    Math.cos(latRad) * Math.sin(angDist) * Math.cos(headingRad)
+  );
+  const newLon = lonRad + Math.atan2(
+    Math.sin(headingRad) * Math.sin(angDist) * Math.cos(latRad),
+    Math.cos(angDist) - Math.sin(latRad) * Math.sin(newLat)
+  );
+  return {
+    lon: (newLon * 180 / Math.PI + 540) % 360 - 180,
+    lat: newLat * 180 / Math.PI,
+  };
+}
+
+/**
+ * Simulate the climb phase with a rate-limited heading (3°/s).
+ *
+ * On every SIM_DT step the aircraft:
+ *   1. Computes bearing toward `cruiseTargetLon/Lat`
+ *   2. Adjusts heading by at most MAX_TURN_RATE_RAD × SIM_DT
+ *   3. Advances position at the altitude-dependent speed
+ *   4. Advances altitude linearly in time (matches planFlight() estimate)
+ *
+ * Result: a smooth wide arc from the runway heading to the cruise course.
+ */
+function buildClimbWithTurn(
+  liftoffLon: number, liftoffLat: number,
+  runwayHeadingRad: number,
+  elev: number,
+  climbStartAlt: number, climbEndAlt: number,
+  cruiseTargetLon: number, cruiseTargetLat: number,
+  t_takeoffEnd: number,
+  climbDuration: number,
+  addSample: AddSampleFn
+): TurnSimResult {
+  let currentLon = liftoffLon;
+  let currentLat = liftoffLat;
+  let currentHeading = runwayHeadingRad;
+  let currentAlt = climbStartAlt;
+  const maxStep = MAX_TURN_RATE_RAD * SIM_DT;
+
+  addSample(t_takeoffEnd, currentLon, currentLat, currentAlt);
+
+  let elapsed = 0;
+  while (currentAlt < climbEndAlt - 0.5) {
+    elapsed += SIM_DT;
+
+    // Turn toward cruise target (limited by maxTurnRate)
+    const targetHeading = computeBearingRad(
+      { lat: currentLat, lon: currentLon },
+      { lat: cruiseTargetLat, lon: cruiseTargetLon }
+    );
+    currentHeading = clampAngleChange(currentHeading, targetHeading, maxStep);
+
+    // Advance position at altitude-dependent speed
+    const speed = getSpeedForAltitude(currentAlt, elev);
+    const next = moveWithHeading(currentLon, currentLat, currentHeading, speed * SIM_DT);
+    currentLon = next.lon;
+    currentLat = next.lat;
+
+    // Altitude: linear in time — keeps total duration equal to planFlight() estimate
+    const altFrac = Math.min(elapsed / climbDuration, 1.0);
+    currentAlt = lerp(climbStartAlt, climbEndAlt, altFrac);
+
+    addSample(t_takeoffEnd + elapsed, currentLon, currentLat, currentAlt);
+
+    if (elapsed > climbDuration * 2) break; // safety guard
+  }
+
+  return {
+    endLon: currentLon, endLat: currentLat,
+    endAlt: currentAlt, endHeading: currentHeading,
+    actualDuration: elapsed,
+  };
+}
+
+/**
+ * Simulate the approach/landing phase with a rate-limited heading (3°/s).
+ *
+ * Starts at `approachEntry` with the geodesic arrival heading and smoothly
+ * steers onto the runway centerline heading while descending — no speed drop.
+ * Altitude follows easeOutQuad in time (mirrors the planFlight() estimate).
+ */
+function buildApproachWithTurn(
+  approachEntryLon: number, approachEntryLat: number,
+  approachEntryAlt: number,
+  initialHeadingRad: number,
+  touchdownLon: number, touchdownLat: number,
+  destElev: number,
+  t_descentEnd: number,
+  landingDuration: number,
+  addSample: AddSampleFn
+): TurnSimResult {
+  let currentLon = approachEntryLon;
+  let currentLat = approachEntryLat;
+  let currentHeading = initialHeadingRad;
+  let currentAlt = approachEntryAlt;
+  const maxStep = MAX_TURN_RATE_RAD * SIM_DT;
+
+  addSample(t_descentEnd, currentLon, currentLat, currentAlt);
+
+  let elapsed = 0;
+  while (currentAlt > destElev + 0.5) {
+    elapsed += SIM_DT;
+
+    // Turn toward touchdown point (limited by maxTurnRate)
+    const targetHeading = computeBearingRad(
+      { lat: currentLat, lon: currentLon },
+      { lat: touchdownLat, lon: touchdownLon }
+    );
+    currentHeading = clampAngleChange(currentHeading, targetHeading, maxStep);
+
+    // Advance position at altitude-dependent approach speed
+    const speed = getSpeedForAltitude(currentAlt, destElev);
+    const next = moveWithHeading(currentLon, currentLat, currentHeading, speed * SIM_DT);
+    currentLon = next.lon;
+    currentLat = next.lat;
+
+    // Altitude: easeOutQuad in time — consistent with planFlight() landing estimate
+    const altFrac = Math.min(elapsed / landingDuration, 1.0);
+    currentAlt = lerp(approachEntryAlt, destElev, easeOutQuad(altFrac));
+
+    addSample(t_descentEnd + elapsed, currentLon, currentLat, currentAlt);
+
+    if (elapsed > landingDuration * 2) break; // safety guard
+  }
+
+  return {
+    endLon: currentLon, endLat: currentLat,
+    endAlt: destElev, endHeading: currentHeading,
+    actualDuration: elapsed,
+  };
 }
