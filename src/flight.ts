@@ -675,12 +675,14 @@ export function createFlight(
     const curr = position.getValue(time);
     if (!curr) return result;
 
+
     const base = velocityOrientation.getValue(time, result);
     if (!base) return result;
 
     let pitch = 0;
     let roll = 0;
     const phase = getPhase(time);
+
     if (phase === "landing" || phase === "rollout") {
       const currCarto = Cesium.Cartographic.fromCartesian(curr);
       const distToTouchdown = haversineDistMeters(
@@ -854,17 +856,40 @@ function buildRouteDeparture(
   }
   t += timing.taxi;
 
-  // ── RUNWAY HOLD ────────────────────────────────────────
+  // ── TAXI→RUNWAY ALIGNMENT ──────────────────────────────
+  // The taxi arrives from a random direction, but the runway hold must
+  // face down the runway. With Hermite interpolation the velocity vector
+  // is derived from the curve tangent, so without these extra samples
+  // the plane would spin around trying to find the right heading.
+  // We add a few tightly-spaced "alignment" samples that drift along
+  // the runway bearing — this overwrites the incoming taxi tangent.
   const firstRwyTarget = route.runwayWaypoints[0] ?? route.liftoffPoint;
   const rwyBearing = computeBearingRad(route.runwayThreshold, firstRwyTarget);
 
+  const ALIGN_DURATION = 0.3; // seconds — very short, almost instant
+  const ALIGN_STEPS = 4;      // enough samples to dominate the Hermite tangent
+  for (let i = 0; i <= ALIGN_STEPS; i++) {
+    const frac = i / ALIGN_STEPS;
+    const elapsed = t + frac * ALIGN_DURATION;
+    addSample(
+      elapsed,
+      route.runwayThreshold.lon + Math.sin(rwyBearing) * DRIFT * (frac * ALIGN_DURATION),
+      route.runwayThreshold.lat + Math.cos(rwyBearing) * DRIFT * (frac * ALIGN_DURATION),
+      elevation
+    );
+  }
+  t += ALIGN_DURATION;
+
+  // ── RUNWAY HOLD ────────────────────────────────────────
+  // Plane is already facing the runway thanks to alignment samples above.
+  // Continue drifting in the same direction during the hold.
   for (let i = 0; i <= 3; i++) {
     const frac = i / 3;
     const elapsed = t + frac * timing.runwayHold;
     addSample(
       elapsed,
-      route.runwayThreshold.lon + Math.sin(rwyBearing) * DRIFT * (frac * timing.runwayHold),
-      route.runwayThreshold.lat + Math.cos(rwyBearing) * DRIFT * (frac * timing.runwayHold),
+      route.runwayThreshold.lon + Math.sin(rwyBearing) * DRIFT * (ALIGN_DURATION + frac * timing.runwayHold),
+      route.runwayThreshold.lat + Math.cos(rwyBearing) * DRIFT * (ALIGN_DURATION + frac * timing.runwayHold),
       elevation
     );
   }
