@@ -571,8 +571,11 @@ export function createFlight(
     return "arrived";
   }
 
-  const FLARE_START_DIST = 1000; // meters before touchdown to begin pitch-up
-  const FLARE_PITCH_RAD = Cesium.Math.toRadians(25);
+  const FLARE_START_DIST = 1500; // meters before touchdown to begin pitch-up
+  const FLARE_PITCH_RAD = Cesium.Math.toRadians(18);
+  const BANK_MAX_RAD = Cesium.Math.toRadians(25);
+  const BANK_TURN_RATE = Cesium.Math.toRadians(6); // rad/s for full bank
+  const BANK_DT = 0.5; // seconds ahead for turn rate estimation
 
   const velocityOrientation = new Cesium.VelocityOrientationProperty(position);
   const scratchMatrix = new Cesium.Matrix3();
@@ -588,6 +591,7 @@ export function createFlight(
     if (!base) return result;
 
     let pitch = 0;
+    let roll = 0;
     const phase = getPhase(time);
     if (phase === "landing" || phase === "rollout") {
       const currCarto = Cesium.Cartographic.fromCartesian(curr);
@@ -603,12 +607,45 @@ export function createFlight(
       }
     }
 
-    if (pitch === 0) return base;
+    const allowBank = phase === "climb" || phase === "cruise" || phase === "descent" || phase === "landing";
+    const nextTime = Cesium.JulianDate.addSeconds(time, BANK_DT, new Cesium.JulianDate());
+    const nextTime2 = Cesium.JulianDate.addSeconds(nextTime, BANK_DT, new Cesium.JulianDate());
+    const nextPos = position.getValue(nextTime);
+    const nextPos2 = position.getValue(nextTime2);
+    if (allowBank && nextPos && nextPos2) {
+      const currCarto = Cesium.Cartographic.fromCartesian(curr);
+      const nextCarto = Cesium.Cartographic.fromCartesian(nextPos);
+      const nextCarto2 = Cesium.Cartographic.fromCartesian(nextPos2);
+
+      const headingNow = computeBearingRad(
+        { lat: Cesium.Math.toDegrees(currCarto.latitude), lon: Cesium.Math.toDegrees(currCarto.longitude) },
+        { lat: Cesium.Math.toDegrees(nextCarto.latitude), lon: Cesium.Math.toDegrees(nextCarto.longitude) }
+      );
+      const headingNext = computeBearingRad(
+        { lat: Cesium.Math.toDegrees(nextCarto.latitude), lon: Cesium.Math.toDegrees(nextCarto.longitude) },
+        { lat: Cesium.Math.toDegrees(nextCarto2.latitude), lon: Cesium.Math.toDegrees(nextCarto2.longitude) }
+      );
+      const dHead = Math.atan2(Math.sin(headingNext - headingNow), Math.cos(headingNext - headingNow));
+      const turnRate = dHead / BANK_DT;
+      const bankFrac = Math.max(-1, Math.min(1, turnRate / BANK_TURN_RATE));
+      roll = BANK_MAX_RAD * bankFrac;
+    }
+
+    if (pitch === 0 && roll === 0) return base;
 
     Cesium.Matrix3.fromQuaternion(base, scratchMatrix);
     Cesium.Matrix3.getColumn(scratchMatrix, 1, scratchAxis); // local right axis (model Y)
     Cesium.Quaternion.fromAxisAngle(scratchAxis, pitch, scratchPitchQuat);
-    return Cesium.Quaternion.multiply(scratchPitchQuat, base, result);
+    let adjusted = Cesium.Quaternion.multiply(scratchPitchQuat, base, result);
+
+    if (roll !== 0) {
+      Cesium.Matrix3.fromQuaternion(adjusted, scratchMatrix);
+      Cesium.Matrix3.getColumn(scratchMatrix, 0, scratchAxis); // local forward axis
+      const rollQuat = Cesium.Quaternion.fromAxisAngle(scratchAxis, roll, new Cesium.Quaternion());
+      adjusted = Cesium.Quaternion.multiply(rollQuat, adjusted, result);
+    }
+
+    return adjusted;
   }, false);
 
   const entity = viewer.entities.add({
