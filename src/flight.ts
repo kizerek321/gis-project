@@ -943,13 +943,17 @@ function buildClimbWithTurn(
   let currentLat = liftoffLat;
   let currentHeading = runwayHeadingRad;
   let currentAlt = climbStartAlt;
-  const maxStep = MAX_TURN_RATE_RAD * SIM_DT;
+  const baseMaxStep = MAX_TURN_RATE_RAD * SIM_DT;
 
   addSample(t_takeoffEnd, currentLon, currentLat, currentAlt);
 
   let elapsed = 0;
   while (currentAlt < climbEndAlt - 0.5) {
     elapsed += SIM_DT;
+
+    // Ease-in the turn rate: straighter at first, more turning later.
+    const turnFrac = climbDuration > 0 ? Math.min(elapsed / climbDuration, 1.0) : 1.0;
+    const maxStep = baseMaxStep * easeInQuad(turnFrac);
 
     // Turn toward cruise target (limited by maxTurnRate)
     const targetHeading = computeBearingRad(
