@@ -89,7 +89,7 @@ const SPEED_RAMP_MID_AGL = 800;      // 450 km/h reached here
 const SPEED_RAMP_END_AGL = 3000;     // Full cruise speed (900 km/h) reached
 
 // Geometry
-const CLIMB_DISTANCE_DEG = 0.1;      // ~11 km horizontal climb distance
+const CLIMB_DISTANCE_M = 15000;      // 15 km straight climb distance
 const APPROACH_DISTANCE_DEG = 0.25;  // ~27 km approach distance
 
 // Fixed durations
@@ -150,6 +150,35 @@ function computePathDistance(waypoints: RouteWaypoint[]): number {
 /** Haversine distance between two lat/lon pairs in meters. */
 function haversineDistMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   return waypointDistMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
+}
+
+/** Project a point from lat/lon using a bearing (radians) and distance (meters). */
+function offsetByBearingMeters(
+  lat: number,
+  lon: number,
+  bearingRad: number,
+  distM: number
+): { lat: number; lon: number } {
+  const R = 6371000;
+  const lat1 = lat * Math.PI / 180;
+  const lon1 = lon * Math.PI / 180;
+  const angDist = distM / R;
+
+  const sinLat1 = Math.sin(lat1);
+  const cosLat1 = Math.cos(lat1);
+  const sinAng = Math.sin(angDist);
+  const cosAng = Math.cos(angDist);
+
+  const sinLat2 = sinLat1 * cosAng + cosLat1 * sinAng * Math.cos(bearingRad);
+  const lat2 = Math.asin(sinLat2);
+
+  const y = Math.sin(bearingRad) * sinAng * cosLat1;
+  const x = cosAng - sinLat1 * sinLat2;
+  const lon2 = lon1 + Math.atan2(y, x);
+
+  const outLat = lat2 * 180 / Math.PI;
+  const outLon = ((lon2 * 180 / Math.PI) + 540) % 360 - 180;
+  return { lat: outLat, lon: outLon };
 }
 
 // Variable-Speed Timing 
@@ -273,8 +302,14 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
   const prevPoint = route.runwayWaypoints[route.runwayWaypoints.length - 1] ?? route.runwayThreshold;
   const runwayHeadingRad = computeBearingRad(prevPoint, route.liftoffPoint);
 
-  const climbExitLon = route.liftoffPoint.lon + Math.sin(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
-  const climbExitLat = route.liftoffPoint.lat + Math.cos(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
+  const climbExit = offsetByBearingMeters(
+    route.liftoffPoint.lat,
+    route.liftoffPoint.lon,
+    runwayHeadingRad,
+    CLIMB_DISTANCE_M
+  );
+  const climbExitLon = climbExit.lon;
+  const climbExitLat = climbExit.lat;
 
   const climbHorizDistM = haversineDistMeters(
     route.liftoffPoint.lat, route.liftoffPoint.lon,
@@ -426,8 +461,9 @@ export function createFlight(
   }
 
   // Climb exit — straight ahead from runway heading
-  const climbExitLon = liftoffLon + Math.sin(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
-  const climbExitLat = liftoffLat + Math.cos(runwayHeadingRad) * CLIMB_DISTANCE_DEG;
+  const climbExit = offsetByBearingMeters(liftoffLat, liftoffLon, runwayHeadingRad, CLIMB_DISTANCE_M);
+  const climbExitLon = climbExit.lon;
+  const climbExitLat = climbExit.lat;
 
   // Dynamic altitude thresholds (AGL-based)
   const climbStartAlt = elev + 50;
@@ -465,52 +501,19 @@ export function createFlight(
   // ── ROUTE-BASED DEPARTURE ────────────────────────────────
   buildRouteDeparture(departureRoute!, elev, addSample, timing);
 
-  // ── TRANSITION 1 (Climb -> Cruise) PRECALCULATIONS ────────
+  // ── CLIMB (liftoff → 3000m AGL, straight for 15 km) ──
   const climbSamples = 1000;
   const climbHorizDistM = haversineDistMeters(liftoffLat, liftoffLon, climbExitLat, climbExitLon);
   const climbCumTimes = computeCumulativeTimes(
     climbHorizDistM, climbStartAlt, climbEndAlt, elev, climbSamples
   );
 
-  const t_trans1Start = t_takeoffEnd + climbCumTimes[Math.floor(climbSamples * 0.95)];
-  const t_trans1End = t_climbEnd + 0.05 * timing.cruise;
-
-  // P0 is at climb at 80% distance / progress
-  const p1_0 = {
-    lon: lerp(liftoffLon, climbExitLon, 0.95),
-    lat: lerp(liftoffLat, climbExitLat, 0.95),
-    alt: lerp(climbStartAlt, climbEndAlt, 0.95)
-  };
-  // P1 is the intersection (control point)
-  const p1_1 = {
-    lon: climbExitLon,
-    lat: climbExitLat,
-    alt: climbEndAlt
-  };
-  // P2 is at 5% of cruise along the great circle
-  const p1_2_gcFrac = lerp(0.0, 0.80, 0.05);
-  const p1_2_interp = geodesic.interpolateUsingFraction(p1_2_gcFrac);
-  const p1_2 = {
-    lon: Cesium.Math.toDegrees(p1_2_interp.longitude),
-    lat: Cesium.Math.toDegrees(p1_2_interp.latitude),
-    alt: lerp(climbEndAlt, CRUISE_ALTITUDE, 0.05 / 0.1)
-  };
-
-  // ── CLIMB (liftoff → 3000m AGL, straight from runway heading) ──
   for (let i = 0; i <= climbSamples; i++) {
     const frac = i / climbSamples;
     const elapsed = t_takeoffEnd + climbCumTimes[i];
-    let lon = lerp(liftoffLon, climbExitLon, frac);
-    let lat = lerp(liftoffLat, climbExitLat, frac);
-    let alt = lerp(climbStartAlt, climbEndAlt, frac);
-
-    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
-      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
-      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
-    }
+    const lon = lerp(liftoffLon, climbExitLon, frac);
+    const lat = lerp(liftoffLat, climbExitLat, frac);
+    const alt = lerp(climbStartAlt, climbEndAlt, frac);
 
     addSample(elapsed, lon, lat, alt);
   }
@@ -530,14 +533,6 @@ export function createFlight(
     if (frac < 0.1) {
       // Initial climb from climbEndAlt to CRUISE_ALTITUDE
       alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / 0.1);
-    }
-
-    if (elapsed >= t_trans1Start && elapsed <= t_trans1End) {
-      const u = (elapsed - t_trans1Start) / (t_trans1End - t_trans1Start);
-      const bezier = getBezierPosition(p1_0, p1_1, p1_2, u);
-      lon = bezier.lon;
-      lat = bezier.lat;
-      alt = bezier.alt;
     }
 
     addSample(elapsed, lon, lat, alt);
