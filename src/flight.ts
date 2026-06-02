@@ -571,36 +571,44 @@ export function createFlight(
     return "arrived";
   }
 
-  const ORIENTATION_DT = 0.25; // seconds ahead for heading estimation
-  const FLARE_START_ALT = 80;  // meters above runway to begin pitch-up
-  const FLARE_PITCH_RAD = Cesium.Math.toRadians(4);
+  const FLARE_START_DIST = 1000; // meters before touchdown to begin pitch-up
+  const FLARE_PITCH_RAD = Cesium.Math.toRadians(25);
+
+  const velocityOrientation = new Cesium.VelocityOrientationProperty(position);
+  const scratchMatrix = new Cesium.Matrix3();
+  const scratchAxis = new Cesium.Cartesian3();
+  const scratchPitchQuat = new Cesium.Quaternion();
 
   const orientation = new Cesium.CallbackProperty((time, result) => {
+    if (!time) return result;
     const curr = position.getValue(time);
     if (!curr) return result;
 
-    const nextTime = Cesium.JulianDate.addSeconds(time, ORIENTATION_DT, new Cesium.JulianDate());
-    const next = position.getValue(nextTime) ?? curr;
-
-    const currCarto = Cesium.Cartographic.fromCartesian(curr);
-    const nextCarto = Cesium.Cartographic.fromCartesian(next);
-    const heading = computeBearingRad(
-      { lat: Cesium.Math.toDegrees(currCarto.latitude), lon: Cesium.Math.toDegrees(currCarto.longitude) },
-      { lat: Cesium.Math.toDegrees(nextCarto.latitude), lon: Cesium.Math.toDegrees(nextCarto.longitude) }
-    );
+    const base = velocityOrientation.getValue(time, result);
+    if (!base) return result;
 
     let pitch = 0;
     const phase = getPhase(time);
     if (phase === "landing" || phase === "rollout") {
-      const agl = currCarto.height - destElev;
-      if (agl <= FLARE_START_ALT) {
-        const t = 1 - Math.max(0, Math.min(1, agl / FLARE_START_ALT));
-        pitch = lerp(0, FLARE_PITCH_RAD, easeOutQuad(t));
+      const currCarto = Cesium.Cartographic.fromCartesian(curr);
+      const distToTouchdown = haversineDistMeters(
+        Cesium.Math.toDegrees(currCarto.latitude),
+        Cesium.Math.toDegrees(currCarto.longitude),
+        landingTargetLat,
+        landingTargetLon
+      );
+      if (distToTouchdown <= FLARE_START_DIST) {
+        const t = 1 - Math.max(0, Math.min(1, distToTouchdown / FLARE_START_DIST));
+        pitch = -lerp(0, FLARE_PITCH_RAD, easeOutQuad(t));
       }
     }
 
-    const hpr = new Cesium.HeadingPitchRoll(heading, pitch, 0);
-    return Cesium.Transforms.headingPitchRollQuaternion(curr, hpr, Cesium.Ellipsoid.WGS84, result);
+    if (pitch === 0) return base;
+
+    Cesium.Matrix3.fromQuaternion(base, scratchMatrix);
+    Cesium.Matrix3.getColumn(scratchMatrix, 1, scratchAxis); // local right axis (model Y)
+    Cesium.Quaternion.fromAxisAngle(scratchAxis, pitch, scratchPitchQuat);
+    return Cesium.Quaternion.multiply(scratchPitchQuat, base, result);
   }, false);
 
   const entity = viewer.entities.add({
