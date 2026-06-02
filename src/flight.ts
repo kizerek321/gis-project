@@ -1,14 +1,19 @@
 /**
  * Flight path engine — generates realistic departure → cruise → landing paths.
  *
- * Speed profile (AGL — above ground level):
- *   Ground:    max 50 km/h (taxi, rollout end)
- *   0–400m:    300 km/h (liftoff / final approach)
- *   400–800m:  300 → 450 km/h
- *   800–3000m: 450 → 900 km/h (main speed increase)
- *   3000m+:    900 km/h (cruise, never exceeded)
+ * This is basically the core module that handles everything about how
+ * the plane moves from point A to point B. It calculates positions,
+ * altitudes, speeds, and timings for every phase of the flight.
  *
- * Climb goes STRAIGHT from the runway heading (no turning).
+ * Speed profile (AGL — above ground level):
+ *   Ground:      max 50 km/h  (taxi, rollout end)
+ *   0–400m:      300 km/h     (liftoff / final approach)
+ *   400–800m:    300 → 450 km/h
+ *   800–3000m:   450 → 900 km/h (main speed increase)
+ *   3000m+:      900 km/h     (cruise, never exceeded)
+ *
+ * Climb phase goes all the way from ground to cruise altitude (10 000 m)
+ * over a ~100 km horizontal distance (~5.7° angle, realistic for airliners).
  * Landing mirrors the climb speed profile in reverse.
  */
 import * as Cesium from "cesium";
@@ -89,8 +94,8 @@ const SPEED_RAMP_MID_AGL = 800;      // 450 km/h reached here
 const SPEED_RAMP_END_AGL = 3000;     // Full cruise speed (900 km/h) reached
 
 // Geometry
-const CLIMB_DISTANCE_M = 15000;      // 15 km straight climb distance
-const APPROACH_DISTANCE_DEG = 0.25;  // ~27 km approach distance
+const CLIMB_DISTANCE_M = 100_000;    // 100 km straight climb distance
+const APPROACH_DISTANCE_DEG = 0.90;  // ~100 km approach distance (matches climb geometry)
 
 // Fixed durations
 const ARRIVAL_GATE_HOLD = 5;         // seconds parked at destination gate
@@ -99,35 +104,54 @@ const MIN_CRUISE_DURATION = 15;      // seconds minimum cruise time
 // ─── Speed Profile ──────────────────────────────────────────
 
 /**
- * Returns the airplane speed (m/s) based on altitude above ground.
+ * Returns the airplane speed (m/s) based on how high it is above the ground.
  *
- * Profile:
- *   Ground level:     50 km/h   (MAX_GROUND_SPEED)
- *   0 – 400m AGL:    300 km/h  (LIFTOFF_SPEED)
- *   400 – 800m AGL:  300→450   (ramp to CLIMB_MID_SPEED)
- *   800 – 3000m AGL: 450→900   (main speed increase)
- *   Above 3000m AGL: 900 km/h  (MAX_SPEED — never exceeded)
+ * So basically the idea here is that planes don't just instantly go fast.
+ * They speed up gradually as they climb higher. This function figures out
+ * what speed the plane should be at for any given altitude.
+ *
+ * The speed ramps up in bands:
+ *   On the ground:      50 km/h  (just taxiing around)
+ *   0 – 400m AGL:      300 km/h (right after liftoff, still slow-ish)
+ *   400 – 800m AGL:    300→450  (starting to pick up speed)
+ *   800 – 3000m AGL:   450→900  (this is where most acceleration happens)
+ *   Above 3000m AGL:   900 km/h (full cruise speed, stays constant)
+ *
+ * @param altitude  - current altitude in meters (MSL = above sea level)
+ * @param groundElev - ground elevation at the airport (to calc AGL)
+ * @returns speed in m/s
  */
 function getSpeedForAltitude(altitude: number, groundElev: number): number {
+  // AGL = Above Ground Level, so we subtract the airport elevation
   const agl = altitude - groundElev;
   if (agl <= 0) return MAX_GROUND_SPEED_MS;
   if (agl <= SPEED_RAMP_START_AGL) return LIFTOFF_SPEED_MS;
   if (agl <= SPEED_RAMP_MID_AGL) {
+    // Linear interpolation between liftoff speed and mid-climb speed
     const frac = (agl - SPEED_RAMP_START_AGL) / (SPEED_RAMP_MID_AGL - SPEED_RAMP_START_AGL);
     return lerp(LIFTOFF_SPEED_MS, CLIMB_MID_SPEED_MS, frac);
   }
   if (agl <= SPEED_RAMP_END_AGL) {
+    // Linear interpolation between mid-climb speed and cruise speed
     const frac = (agl - SPEED_RAMP_MID_AGL) / (SPEED_RAMP_END_AGL - SPEED_RAMP_MID_AGL);
     return lerp(CLIMB_MID_SPEED_MS, MAX_SPEED_MS, frac);
   }
   return MAX_SPEED_MS;
 }
 
-//Distance Helpers
+// ─── Distance Helpers ───────────────────────────────────────
+// These functions calculate distances on Earth's surface.
+// We use the Haversine formula which accounts for the Earth being round
+// (not flat lol). It's super important for getting accurate distances
+// between airports that might be thousands of km apart.
 
-/** Haversine distance between two waypoints in meters. */
+/**
+ * Haversine distance between two waypoints in meters.
+ * This is the "as the crow flies" distance along the Earth's surface.
+ * We use it everywhere to figure out how far apart two points are.
+ */
 function waypointDistMeters(a: RouteWaypoint, b: RouteWaypoint): number {
-  const R = 6371000;
+  const R = 6371000; // Earth's radius in meters
   const dLat = (b.lat - a.lat) * Math.PI / 180;
   const dLon = (b.lon - a.lon) * Math.PI / 180;
   const lat1 = a.lat * Math.PI / 180;
@@ -138,7 +162,11 @@ function waypointDistMeters(a: RouteWaypoint, b: RouteWaypoint): number {
   return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
-/** Total path length through an array of waypoints (meters). */
+/**
+ * Total path length through an array of waypoints (meters).
+ * Basically just adds up the distance between each consecutive pair.
+ * Used for taxi routes, runway paths, etc.
+ */
 function computePathDistance(waypoints: RouteWaypoint[]): number {
   let total = 0;
   for (let i = 0; i < waypoints.length - 1; i++) {
@@ -147,22 +175,28 @@ function computePathDistance(waypoints: RouteWaypoint[]): number {
   return total;
 }
 
-/** Haversine distance between two lat/lon pairs in meters. */
+/** Convenience wrapper — same haversine but takes raw lat/lon numbers. */
 function haversineDistMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   return waypointDistMeters({ lat: lat1, lon: lon1 }, { lat: lat2, lon: lon2 });
 }
 
-/** Project a point from lat/lon using a bearing (radians) and distance (meters). */
+/**
+ * Project a point from lat/lon using a bearing (radians) and distance (meters).
+ *
+ * Think of it like: "I'm standing here, facing this direction, and I walk
+ * X meters forward — where do I end up?" Uses spherical Earth math so it
+ * works correctly even for long distances (like the 100 km climb segment).
+ */
 function offsetByBearingMeters(
   lat: number,
   lon: number,
   bearingRad: number,
   distM: number
 ): { lat: number; lon: number } {
-  const R = 6371000;
+  const R = 6371000; // Earth's radius in meters
   const lat1 = lat * Math.PI / 180;
   const lon1 = lon * Math.PI / 180;
-  const angDist = distM / R;
+  const angDist = distM / R; // angular distance on the sphere
 
   const sinLat1 = Math.sin(lat1);
   const cosLat1 = Math.cos(lat1);
@@ -181,11 +215,20 @@ function offsetByBearingMeters(
   return { lat: outLat, lon: outLon };
 }
 
-// Variable-Speed Timing 
+// ─── Variable-Speed Timing ──────────────────────────────────
+// These functions handle the tricky part where the plane changes speed
+// at different altitudes. We can't just do distance/speed because the
+// speed keeps changing as the plane climbs or descends.
 
 /**
  * Compute total time (seconds) to traverse a path with altitude-dependent speed.
- * Uses numerical integration over the given number of segments.
+ *
+ * This is basically numerical integration (like from calculus class).
+ * We split the path into tiny segments, figure out the speed at each one,
+ * and sum up all the little time = distance/speed values.
+ *
+ * The easeFn parameter lets us control how the altitude changes — linear,
+ * easeOut, etc. This affects the speed profile and therefore the total time.
  */
 function computeVariableSpeedDuration(
   horizDistM: number,
@@ -205,6 +248,7 @@ function computeVariableSpeedDuration(
     const alt1 = lerp(startAlt, endAlt, easeFn(f1));
     const altMid = lerp(startAlt, endAlt, easeFn(fMid));
 
+    // Pythagorean theorem: actual segment distance includes altitude change
     const segHorizDist = horizDistM / segments;
     const altChange = alt1 - alt0;
     const segDist = Math.sqrt(segHorizDist * segHorizDist + altChange * altChange);
@@ -219,18 +263,21 @@ function computeVariableSpeedDuration(
  * For a linear speed ramp (v0 → v1) over a distance, compute the fraction
  * of total time elapsed at a given fraction of total distance.
  *
- * Uses analytical integral: timeFrac = ln(v(f)/v0) / ln(v1/v0).
+ * This is the analytical solution — basically solving the integral of
+ * 1/v(x) dx where v changes linearly. Way more accurate than just
+ * dividing distance by average speed.
+ *
+ * Formula: timeFrac = ln(v(f)/v0) / ln(v1/v0)
  */
 function linearSpeedTimeFrac(distFrac: number, v0: number, v1: number): number {
-  if (Math.abs(v1 - v0) < 0.01) return distFrac; // constant speed
+  if (Math.abs(v1 - v0) < 0.01) return distFrac; // constant speed — simple case
   const vAtF = v0 + (v1 - v0) * distFrac;
   return Math.log(vAtF / v0) / Math.log(v1 / v0);
 }
 
 /**
  * Total time to traverse a distance with linearly-changing speed v0 → v1.
- *
- * Analytical: T = D · ln(v1/v0) / (v1 − v0).
+ * Also analytical — T = D · ln(v1/v0) / (v1 − v0).
  */
 function linearSpeedTotalTime(dist: number, v0: number, v1: number): number {
   if (Math.abs(v1 - v0) < 0.01) return dist / v0;
@@ -241,7 +288,14 @@ function linearSpeedTotalTime(dist: number, v0: number, v1: number): number {
 
 /**
  * Calculate flight timing plan (used for preview before starting).
- * Computes phase durations from real waypoint distances and speed profiles.
+ *
+ * This is like a "dry run" — we figure out how long each phase will take
+ * BEFORE we actually animate anything. The UI uses this to show the
+ * estimated flight duration. Then createFlight() uses the same plan
+ * to build the actual 3D path with position samples.
+ *
+ * Phases: gate → taxi → runway hold → takeoff → climb → cruise →
+ *         descent → landing → rollout → arrival taxi → arrival gate
  */
 export function planFlight(departure: Airport, destination: Airport): FlightPlan {
   const distanceKm = getDistanceKm(departure, destination);
@@ -285,7 +339,9 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
   );
 
   const climbStartAlt = elev + 50;
-  const climbEndAlt = elev + SPEED_RAMP_END_AGL; // 3000m AGL
+  // Climb all the way to cruise altitude (10 000 m) instead of stopping at 3000m AGL.
+  // This gives a much more realistic and gradual climb angle.
+  const climbEndAlt = CRUISE_ALTITUDE;
 
   const climbTime = computeVariableSpeedDuration(
     climbHorizDistM, climbStartAlt, climbEndAlt, elev
@@ -310,7 +366,8 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
     landingTargetLat, landingTargetLon
   );
 
-  const approachStartAlt = destElev + SPEED_RAMP_END_AGL; // 3000m AGL
+  // Approach starts from cruise altitude — mirrors the climb
+  const approachStartAlt = CRUISE_ALTITUDE;
   const approachEndAlt = destElev;
 
   const landingTime = computeVariableSpeedDuration(
@@ -318,6 +375,8 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
   );
 
   // ── Cruise & Descent ────────────────────────────────────
+  // The middle part of the flight — plane is already at cruise altitude,
+  // just flying in a straight(ish) great-circle line at full speed.
   const gcDistM = haversineDistMeters(
     climbExitLat, climbExitLon,
     approachEntryLat, approachEntryLon
@@ -325,10 +384,10 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
   const cruiseDistM = gcDistM * 0.8;
   const descentDistM = gcDistM * 0.2;
 
-  // Cruise (includes climb from climbEndAlt to CRUISE_ALTITUDE) — all at MAX_SPEED
+  // Cruise — already at CRUISE_ALTITUDE, constant MAX_SPEED
   const cruiseTime = Math.max(MIN_CRUISE_DURATION, cruiseDistM / MAX_SPEED_MS);
 
-  // Descent (CRUISE_ALTITUDE → approachStartAlt) — all at MAX_SPEED (above 3000m AGL)
+  // Descent (CRUISE_ALTITUDE → approachStartAlt) — all at MAX_SPEED
   const descentTime = descentDistM / MAX_SPEED_MS;
 
   // ── Arrival phases ──────────────────────────────────────
@@ -373,6 +432,15 @@ export function planFlight(departure: Airport, destination: Airport): FlightPlan
 
 /**
  * Build the complete flight entity with sampled positions.
+ *
+ * This is the big one — it takes the flight plan and turns it into an
+ * actual animated 3D entity in Cesium. It generates thousands of position
+ * samples (lat/lon/alt at specific times) which Cesium then interpolates
+ * between to create smooth movement.
+ *
+ * Each flight phase adds its own samples, and the timing boundaries get
+ * updated as we go (because the actual simulation might take slightly
+ * different time than what planFlight() estimated).
  */
 export function createFlight(
   viewer: Cesium.Viewer,
@@ -381,9 +449,12 @@ export function createFlight(
   const { departure, destination, timing, totalDuration, departureRoute, arrivalRoute } = plan;
 
   const start = viewer.clock.currentTime.clone();
-  const stop = Cesium.JulianDate.addSeconds(start, totalDuration, new Cesium.JulianDate());
+  // We'll set the real stopTime later after all phases are built,
+  // because the actual duration can differ from the estimate.
+  let stop = Cesium.JulianDate.addSeconds(start, totalDuration, new Cesium.JulianDate());
 
-  // Configure clock
+  // Configure clock — CLAMPED stops the clock at stopTime so the flight
+  // doesn't loop. The stopTime is recalculated later to match actual duration.
   viewer.clock.startTime = start.clone();
   viewer.clock.stopTime = stop.clone();
   viewer.clock.currentTime = start.clone();
@@ -392,9 +463,9 @@ export function createFlight(
   // Build sampled position
   const position = new Cesium.SampledPositionProperty();
   position.setInterpolationOptions({
-    interpolationDegree: 1,
-    interpolationAlgorithm: Cesium.LinearApproximation,
-  });
+  interpolationDegree: 3,
+  interpolationAlgorithm: Cesium.HermitePolynomialApproximation,
+});
 
   const elev = departure.elevation;
   const destElev = destination.elevation;
@@ -428,10 +499,10 @@ export function createFlight(
     liftoffLat = departure.lat + Math.cos(runwayHeadingRad) * 0.02;
   }
 
-  // Dynamic altitude thresholds (AGL-based)
+  // Climb goes all the way to cruise altitude now (not just 3000m AGL)
   const climbStartAlt = elev + 50;
-  const climbEndAlt = elev + SPEED_RAMP_END_AGL;          // 3000m AGL
-  const approachEntryAlt = destElev + SPEED_RAMP_END_AGL;  // 3000m AGL
+  const climbEndAlt = CRUISE_ALTITUDE;
+  const approachEntryAlt = CRUISE_ALTITUDE;
 
   // Determine landing target
   let landingTargetLat: number;
@@ -487,8 +558,11 @@ export function createFlight(
   const geodesic = new Cesium.EllipsoidGeodesic(climbEndCartographic, approachEntryCartographic);
 
   // ── CRUISE (great circle at cruise altitude) ──────────────
+  // The plane is already at CRUISE_ALTITUDE after the climb phase,
+  // so we just fly level at constant altitude and max speed.
+  // No more need for the CRUISE_CLIMB_FRAC hack since climb now goes
+  // all the way to 10 000 m.
   const cruiseSamples = 1000;
-  const CRUISE_CLIMB_FRAC = 1 / 30; // reach cruise altitude in ~3.3% of cruise distance
   for (let i = 0; i <= cruiseSamples; i++) {
     const frac = i / cruiseSamples;
     const elapsed = t_climbEnd + frac * timing.cruise;
@@ -498,13 +572,7 @@ export function createFlight(
     const lon = Cesium.Math.toDegrees(interp.longitude);
     const lat = Cesium.Math.toDegrees(interp.latitude);
 
-    let alt = CRUISE_ALTITUDE;
-    if (frac < CRUISE_CLIMB_FRAC) {
-      // Continue climb from 3 000 m AGL to cruise altitude early in cruise
-      alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / CRUISE_CLIMB_FRAC);
-    }
-
-    addSample(elapsed, lon, lat, alt);
+    addSample(elapsed, lon, lat, CRUISE_ALTITUDE);
   }
 
   // ── DESCENT (cruise altitude → approach altitude) ─────────
@@ -554,6 +622,24 @@ export function createFlight(
     buildRouteArrival(arrivalRoute, destElev, addSample, timing, t_landingEnd);
   }
 
+  // ── FIX: Recalculate the actual total duration after all simulations ──
+  // The climb and landing simulations can produce slightly different durations
+  // than what planFlight() estimated. If we don't update stopTime, the clock
+  // will either freeze too early or leave a gap at the end.
+  const actualTotalDuration = t_arrivalTaxiEnd + timing.arrivalGate;
+  stop = Cesium.JulianDate.addSeconds(start, actualTotalDuration, new Cesium.JulianDate());
+  viewer.clock.stopTime = stop.clone();
+
+  /**
+   * Figure out which phase of the flight we're currently in.
+   * This is called every 200ms from main.ts to update the UI label
+   * ("Climbing", "Cruising", etc.) and also to trigger arrival handling.
+   *
+   * It just checks elapsed time against the phase boundaries we computed.
+   * Uses the ACTUAL boundaries (after simulation adjustments), not the
+   * original estimates — that's why the totalDuration reference was
+   * changed to actualTotalDuration.
+   */
   function getPhase(currentTime: Cesium.JulianDate): FlightPhase {
     const elapsed = Cesium.JulianDate.secondsDifference(currentTime, start);
     if (elapsed < 0) return "preflight";
@@ -567,7 +653,9 @@ export function createFlight(
     if (elapsed <= t_landingEnd) return "landing";
     if (timing.rollout > 0 && elapsed <= t_rolloutEnd) return "rollout";
     if (timing.arrivalTaxi > 0 && elapsed <= t_arrivalTaxiEnd) return "arrival_taxi";
-    if (timing.arrivalGate > 0 && elapsed < totalDuration) return "arrival_gate";
+    // Small epsilon (0.5s) so floating-point rounding at CLAMPED stopTime
+    // doesn't keep us stuck in "arrival_gate" forever
+    if (timing.arrivalGate > 0 && elapsed < actualTotalDuration - 0.5) return "arrival_gate";
     return "arrived";
   }
 
@@ -648,6 +736,9 @@ export function createFlight(
     return adjusted;
   }, false);
 
+  // Create the 3D entity that Cesium will render and track with the camera.
+  // The availability interval tells Cesium when this entity "exists" —
+  // we use the updated stop time so it covers the full actual flight.
   const entity = viewer.entities.add({
     name: `Flight ${departure.code} → ${destination.code}`,
     availability: new Cesium.TimeIntervalCollection([
@@ -670,7 +761,7 @@ export function createFlight(
       }),
       width: 8,
       leadTime: 0,
-      trailTime: totalDuration,
+      trailTime: actualTotalDuration,
     },
   });
 
@@ -690,11 +781,19 @@ export function createFlight(
 
 // ─── Build Route Departure ──────────────────────────────────
 
+// This type is just a shorthand for the "add a position sample" callback.
+// Every phase builder uses it to register (time, lon, lat, alt) points.
 type AddSampleFn = (elapsed: number, lon: number, lat: number, alt: number) => void;
 
 /**
  * Build samples for a route-based departure: gate → taxi → hold → takeoff roll → liftoff.
- * Taxi at 50 km/h, takeoff roll with acceleration from 0 to 300 km/h.
+ *
+ * This handles everything that happens on the ground before the plane
+ * actually takes off. The plane sits at the gate, taxis to the runway,
+ * waits for clearance, then accelerates down the runway and lifts off.
+ *
+ * Taxi speed: 50 km/h (constant)
+ * Takeoff roll: 0 → 300 km/h (constant acceleration, like v = a*t)
  */
 function buildRouteDeparture(
   route: DepartureRoute,
@@ -821,7 +920,13 @@ function buildRouteDeparture(
 
 /**
  * Build samples for a route-based arrival: rollout → taxi to gate → gate hold.
- * Rollout decelerates from 300 → 50 km/h, taxi at constant 50 km/h.
+ *
+ * This is basically the departure in reverse — after touchdown the plane
+ * decelerates on the runway (rollout), turns off the runway, and taxis
+ * to the destination gate at low speed.
+ *
+ * Rollout: decelerates from 300 → 50 km/h (reverse of takeoff acceleration)
+ * Taxi: constant 50 km/h to the gate
  */
 function buildRouteArrival(
   route: ArrivalRoute,
@@ -920,22 +1025,35 @@ function buildRouteArrival(
 }
 
 
+// ─── Math Utility Functions ─────────────────────────────────
+// These are small helper functions used all over the place.
+// lerp = linear interpolation, easing functions control acceleration curves.
+
+/** Linear interpolation — blends between a and b based on t (0 to 1). */
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+/** Ease-in (starts slow, ends fast) — used for takeoff acceleration feel. */
 function easeInQuad(t: number): number {
   return t * t;
 }
 
+/** Ease-out (starts fast, ends slow) — used for landing deceleration feel. */
 function easeOutQuad(t: number): number {
   return t * (2 - t);
 }
 
+/** Ease-in-out (smooth start AND end) — used for the descent altitude curve. */
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
+/**
+ * Compute the initial bearing (in radians) from one waypoint to another.
+ * North = 0, East = PI/2, South = PI, West = 3PI/2.
+ * This is essential for figuring out which direction the plane should face.
+ */
 function computeBearingRad(from: RouteWaypoint, to: RouteWaypoint): number {
   const dLon = (to.lon - from.lon) * Math.PI / 180;
   const lat1 = from.lat * Math.PI / 180;
@@ -960,19 +1078,25 @@ const MAX_TURN_RATE_RAD = Cesium.Math.toRadians(3);     // 3°/s — Standard Ra
 
 /**
  * Clamp a heading change to ±maxStep using shortest-path normalization.
- * Ensures the aircraft always turns in the shorter direction.
+ *
+ * Without this, the plane might try to turn 350° to the right instead
+ * of 10° to the left. The atan2 trick normalizes the angle difference
+ * to [-PI, PI] so it always picks the shorter turn direction.
  */
 function clampAngleChange(current: number, target: number, maxStep: number): number {
   let diff = target - current;
-  // Normalize to [-PI, PI] for shortest-path turn direction
+  // Normalize to [-PI, PI] — this is the key trick for shortest-path turns
   diff = Math.atan2(Math.sin(diff), Math.cos(diff));
   if (Math.abs(diff) <= maxStep) return target;
   return current + Math.sign(diff) * maxStep;
 }
 
 /**
- * Move a lat/lon position `distMeters` in direction `headingRad`
- * (North = 0, East = PI/2) using the spherical Earth model.
+ * Move a lat/lon position `distMeters` in direction `headingRad`.
+ *
+ * Similar to offsetByBearingMeters but slightly simpler — used in the
+ * step-by-step simulation loops (climb and approach) where we advance
+ * the plane's position each SIM_DT step.
  */
 function moveWithHeading(
   lon: number, lat: number,
@@ -999,13 +1123,18 @@ function moveWithHeading(
 /**
  * Simulate the climb phase with a rate-limited heading (3°/s).
  *
- * On every SIM_DT step the aircraft:
- *   1. Computes bearing toward `cruiseTargetLon/Lat`
- *   2. Adjusts heading by at most MAX_TURN_RATE_RAD × SIM_DT
- *   3. Advances position at the altitude-dependent speed
- *   4. Advances altitude linearly in time (matches planFlight() estimate)
+ * This is one of the coolest parts — instead of just teleporting the plane
+ * to cruise altitude, we simulate it step-by-step. Every 0.5 seconds:
+ *   1. Figure out which direction the cruise waypoint is
+ *   2. Turn the plane toward it (but max 3°/s, like a real plane)
+ *   3. Move forward based on current speed (which depends on altitude)
+ *   4. Increase altitude gradually
  *
- * Result: a smooth wide arc from the runway heading to the cruise course.
+ * The result is a nice smooth arc from the runway heading to the
+ * cruise course, which looks way more realistic than an instant turn.
+ *
+ * The plane now climbs all the way to 10 000 m (cruise altitude)
+ * over about 100 km, giving a reasonable ~5.7° climb angle.
  */
 function buildClimbWithTurn(
   liftoffLon: number, liftoffLat: number,
@@ -1023,36 +1152,38 @@ function buildClimbWithTurn(
   let currentAlt = climbStartAlt;
   const baseMaxStep = MAX_TURN_RATE_RAD * SIM_DT;
 
+  // First sample: right at liftoff position
   addSample(t_takeoffEnd, currentLon, currentLat, currentAlt);
 
   let elapsed = 0;
   while (currentAlt < climbEndAlt - 0.5) {
     elapsed += SIM_DT;
 
-    // Ease-in the turn rate: straighter at first, more turning later.
+    // Ease-in the turn rate so the plane flies straight right after
+    // takeoff and gradually starts turning toward the cruise waypoint.
     const turnFrac = climbDuration > 0 ? Math.min(elapsed / climbDuration, 1.0) : 1.0;
     const maxStep = baseMaxStep * easeInQuad(turnFrac);
 
-    // Turn toward cruise target (limited by maxTurnRate)
+    // Figure out which way the cruise target is and turn toward it
     const targetHeading = computeBearingRad(
       { lat: currentLat, lon: currentLon },
       { lat: cruiseTargetLat, lon: cruiseTargetLon }
     );
     currentHeading = clampAngleChange(currentHeading, targetHeading, maxStep);
 
-    // Advance position at altitude-dependent speed
+    // Move forward at the speed appropriate for current altitude
     const speed = getSpeedForAltitude(currentAlt, elev);
     const next = moveWithHeading(currentLon, currentLat, currentHeading, speed * SIM_DT);
     currentLon = next.lon;
     currentLat = next.lat;
 
-    // Altitude: linear in time — keeps total duration equal to planFlight() estimate
+    // Altitude increases linearly with time
     const altFrac = Math.min(elapsed / climbDuration, 1.0);
     currentAlt = lerp(climbStartAlt, climbEndAlt, altFrac);
 
     addSample(t_takeoffEnd + elapsed, currentLon, currentLat, currentAlt);
 
-    if (elapsed > climbDuration * 2) break; // safety guard
+    if (elapsed > climbDuration * 2) break; // safety guard against infinite loops
   }
 
   return {
@@ -1065,9 +1196,14 @@ function buildClimbWithTurn(
 /**
  * Simulate the approach/landing phase with a rate-limited heading (3°/s).
  *
- * Starts at `approachEntry` with the geodesic arrival heading and smoothly
- * steers onto the runway centerline heading while descending — no speed drop.
- * Altitude follows easeOutQuad in time (mirrors the planFlight() estimate).
+ * This is the mirror image of buildClimbWithTurn — the plane starts
+ * at cruise altitude (~100 km from the runway) and gradually descends
+ * while turning to align with the runway centerline.
+ *
+ * The altitude uses easeOutQuad (drops quickly at first, then levels off
+ * near the ground) which mimics a real ILS approach glide slope.
+ * The plane slows down naturally as it gets lower because
+ * getSpeedForAltitude() returns lower speeds at lower altitudes.
  */
 function buildApproachWithTurn(
   approachEntryLon: number, approachEntryLat: number,
@@ -1095,17 +1231,18 @@ function buildApproachWithTurn(
   while (true) {
     elapsed += SIM_DT;
 
-    // Turn toward touchdown point (limited by maxTurnRate)
+    // Steer toward the touchdown point, limited by max turn rate
     const targetHeading = computeBearingRad(
       { lat: currentLat, lon: currentLon },
       { lat: touchdownLat, lon: touchdownLon }
     );
     currentHeading = clampAngleChange(currentHeading, targetHeading, maxStep);
 
-    // Advance position at altitude-dependent approach speed
+    // Check if we're close enough to snap to touchdown
     const speed = getSpeedForAltitude(currentAlt, destElev);
     const distToTarget = haversineDistMeters(currentLat, currentLon, touchdownLat, touchdownLon);
     if (distToTarget <= speed * SIM_DT) {
+      // We've arrived at the runway — snap to touchdown position
       currentLon = touchdownLon;
       currentLat = touchdownLat;
       currentAlt = destElev;
@@ -1113,11 +1250,14 @@ function buildApproachWithTurn(
       break;
     }
 
+    // Move forward
     const next = moveWithHeading(currentLon, currentLat, currentHeading, speed * SIM_DT);
     currentLon = next.lon;
     currentLat = next.lat;
 
-    // Altitude: easeOutQuad by distance-to-touchdown to avoid early ground contact
+    // Descend using easeOutQuad based on how far we still are from touchdown.
+    // easeOutQuad makes the plane drop faster when far away and level off
+    // as it gets close — this prevents the plane from hitting the ground early.
     const distToTargetAfter = haversineDistMeters(currentLat, currentLon, touchdownLat, touchdownLon);
     const distFrac = Math.min(1.0, Math.max(0.0, 1 - distToTargetAfter / totalApproachDist));
     currentAlt = lerp(approachEntryAlt, destElev, easeOutQuad(distFrac));

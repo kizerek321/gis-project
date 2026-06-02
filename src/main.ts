@@ -1,8 +1,12 @@
 /**
  * Flight Simulator — Main Application
  *
- * Bootstraps the Cesium scene, wires up the UI, and orchestrates
- * flight simulation with realistic departure camera choreography.
+ * This is the entry point for the whole simulator. It sets up the 3D map,
+ * connects all the buttons and dropdowns in the UI, and manages the flight
+ * lifecycle (start, track phases, handle arrival, reset).
+ *
+ * Think of this as the "controller" that ties together the Cesium viewer
+ * (the 3D globe) and the flight engine (flight.ts).
  */
 import * as Cesium from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
@@ -35,13 +39,18 @@ const infoSpeed = document.getElementById("infoSpeed") as HTMLSpanElement;
 const infoAltitude = document.getElementById("infoAltitude") as HTMLSpanElement;
 
 
+/**
+ * Initialize everything when the page loads.
+ * Sets up the 3D viewer, populates the airport dropdowns, and points
+ * the camera at a nice globe view so the user sees something cool.
+ */
 function init(): void {
   viewer = initScene("cesiumContainer");
 
   populateDropdowns();
   wireEvents();
 
-  // Set initial camera to a globe view
+  // Start with a nice overview of the globe, centered roughly on Europe
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(18.4661, 54.3776, 15000000),
     orientation: {
@@ -52,8 +61,10 @@ function init(): void {
   });
 }
 
-//  Populate airport dropdowns 
-
+/**
+ * Fill the departure and destination dropdowns with all available airports.
+ * Sorted alphabetically by city name so they're easy to find.
+ */
 function populateDropdowns(): void {
   const sorted = [...AIRPORTS].sort((a, b) => a.city.localeCompare(b.city));
 
@@ -78,30 +89,39 @@ function populateDropdowns(): void {
   updateFlightInfo();
 }
 
-// ─── Event wiring ───────────────────────────────────────────
-
+/**
+ * Hook up all the event listeners — buttons, dropdowns, speed controls.
+ * This runs once at init and connects the HTML elements to our functions.
+ */
 function wireEvents(): void {
   flyButton.addEventListener("click", startFlight);
   cancelButton.addEventListener("click", resetFlight);
   departureSelect.addEventListener("change", updateFlightInfo);
   destinationSelect.addEventListener("change", updateFlightInfo);
 
-  // Speed control buttons
+  // Speed control buttons (1x, 2x, 5x, 10x, etc.)
+  // Each button has a data-speed attribute with the multiplier value
   document.querySelectorAll("[data-speed]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const speed = parseFloat((btn as HTMLElement).dataset.speed || "1");
       if (viewer) {
-        // here we increase the speed of the simulation
+        // This is how we speed up/slow down the simulation —
+        // Cesium's clock multiplier controls how many sim-seconds
+        // pass per real-world second
         viewer.clock.multiplier = speed;
       }
+      // Update the active button styling
       document.querySelectorAll("[data-speed]").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
     });
   });
 }
 
-// ─── Update flight info display ─────────────────────────────
-
+/**
+ * Update the info panel (route, distance, duration) when the user
+ * changes the departure or destination dropdown.
+ * Also does a quick validation — you can't fly to the same airport!
+ */
 function updateFlightInfo(): void {
   const dep = AIRPORTS.find((a) => a.code === departureSelect.value);
   const dest = AIRPORTS.find((a) => a.code === destinationSelect.value);
@@ -124,23 +144,29 @@ function updateFlightInfo(): void {
   flyButton.textContent = isSame ? "Select different airports" : "Start Flight";
 }
 
-// ─── Start flight simulation ────────────────────────────────
-
+/**
+ * The main function that kicks off a flight simulation.
+ * Creates the flight plan, builds the 3D entity, starts the clock,
+ * and switches the UI to "flying" mode.
+ */
 function startFlight(): void {
   const dep = AIRPORTS.find((a) => a.code === departureSelect.value) as Airport;
   const dest = AIRPORTS.find((a) => a.code === destinationSelect.value) as Airport;
 
   if (!dep || !dest || dep.code === dest.code) return;
 
-  // Clean up any previous flight
+  // Clean up any previous flight so we don't have stale entities
   cleanupFlight();
 
   const plan = planFlight(dep, dest);
   currentFlight = createFlight(viewer, plan);
 
-  // Start clock
+  // Start the Cesium clock — this makes time actually advance
   viewer.clock.shouldAnimate = true;
   viewer.clock.multiplier = 1.0;
+
+  // This tick listener runs every frame to update the speed/altitude display.
+  // It calculates instantaneous speed by looking at position 1 second apart.
   viewer.clock.onTick.addEventListener((clock) => {
   if (!currentFlight || !currentFlight.entity.position) return;
 
@@ -158,7 +184,7 @@ function startFlight(): void {
     infoSpeed.textContent = "0 km/h";
   }
 
-  // Altitude display
+  // Altitude display — convert from Cesium's cartographic height
   if (pos1) {
     const carto = Cesium.Cartographic.fromCartesian(pos1);
     const altMeters = Math.max(0, Math.round(carto.height));
@@ -172,9 +198,10 @@ function startFlight(): void {
   }
   });
 
+  // Make the camera follow the plane
   viewer.trackedEntity = currentFlight.entity;
 
-  // UI state: flying
+  // Switch UI to "flying" mode — hide the fly button, show cancel + speed
   flyButton.style.display = "none";
   cancelButton.style.display = "block";
   speedControls.style.display = "flex";
@@ -186,7 +213,7 @@ function startFlight(): void {
   document.querySelectorAll("[data-speed]").forEach((b) => b.classList.remove("active"));
   document.querySelector('[data-speed="1"]')?.classList.add("active");
 
-  // Start phase tracking
+  // Start checking what phase we're in (climb, cruise, etc.)
   startPhaseTracking();
 
   console.log(
@@ -194,8 +221,12 @@ function startFlight(): void {
   );
 }
 
-// Phase tracking 
-
+/**
+ * Poll the current flight phase every 200ms and update the UI.
+ * When the phase changes (e.g. climb → cruise), it triggers a UI update
+ * and a pulse animation to draw attention. When we reach "arrived",
+ * it triggers the arrival handler.
+ */
 function startPhaseTracking(): void {
   if (phaseUpdateInterval !== null) {
     clearInterval(phaseUpdateInterval);
@@ -261,26 +292,34 @@ function updatePhaseUI(phase: FlightPhase): void {
   phaseIndicator.classList.add("phase-pulse");
 }
 
-// Arrival handling
-
+/**
+ * Called when the flight reaches the "arrived" phase.
+ * Stops the clock so the plane doesn't loop, changes the cancel button
+ * text to "New Flight", and auto-resets after 5 seconds.
+ */
 function handleArrival(): void {
   console.log("Flight arrived!");
 
+  // Stop the simulation clock so time doesn't keep running
   viewer.clock.shouldAnimate = false;
   cancelButton.textContent = "New Flight";
 
-  // Stay on parked plane for 10 seconds, then reset
+  // Wait 5 seconds so the user can see the plane at the gate,
+  // then automatically reset to allow a new flight
   arrivalTimeout = window.setTimeout(() => {
     resetFlight();
   }, 5000);
 }
 
-// Reset / Cancel flight
-
+/**
+ * Reset the simulator back to its initial state.
+ * Cleans up the current flight, restores the UI, and flies the camera
+ * back to the nice globe overview.
+ */
 function resetFlight(): void {
   cleanupFlight();
 
-  // Reset UI
+  // Restore UI to "ready" state
   flyButton.style.display = "block";
   cancelButton.style.display = "none";
   cancelButton.textContent = "Cancel Flight";
@@ -289,7 +328,7 @@ function resetFlight(): void {
   departureSelect.disabled = false;
   destinationSelect.disabled = false;
 
-  // Reset camera to globe view
+  // Smooth camera transition back to the globe view
   viewer.camera.flyTo({
     destination: Cesium.Cartesian3.fromDegrees(18.4661, 54.3776, 15000000),
     orientation: {
@@ -303,6 +342,12 @@ function resetFlight(): void {
   updateFlightInfo();
 }
 
+/**
+ * Clean up all flight-related resources.
+ * Clears intervals, timeouts, removes entities, stops the clock, etc.
+ * This is called both when canceling a flight and when starting a new one
+ * (to make sure we don't have leftover state from a previous flight).
+ */
 function cleanupFlight(): void {
   if (phaseUpdateInterval !== null) {
     clearInterval(phaseUpdateInterval);
