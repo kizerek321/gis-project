@@ -466,20 +466,20 @@ export function createFlight(
   buildRouteDeparture(departureRoute!, elev, addSample, timing);
 
   // ── TRANSITION 1 (Climb -> Cruise) PRECALCULATIONS ────────
-  const climbSamples = 100;
+  const climbSamples = 1000;
   const climbHorizDistM = haversineDistMeters(liftoffLat, liftoffLon, climbExitLat, climbExitLon);
   const climbCumTimes = computeCumulativeTimes(
     climbHorizDistM, climbStartAlt, climbEndAlt, elev, climbSamples
   );
 
-  const t_trans1Start = t_takeoffEnd + climbCumTimes[Math.floor(climbSamples * 0.8)];
+  const t_trans1Start = t_takeoffEnd + climbCumTimes[Math.floor(climbSamples * 0.95)];
   const t_trans1End = t_climbEnd + 0.05 * timing.cruise;
 
   // P0 is at climb at 80% distance / progress
   const p1_0 = {
-    lon: lerp(liftoffLon, climbExitLon, 0.8),
-    lat: lerp(liftoffLat, climbExitLat, 0.8),
-    alt: lerp(climbStartAlt, climbEndAlt, 0.8)
+    lon: lerp(liftoffLon, climbExitLon, 0.95),
+    lat: lerp(liftoffLat, climbExitLat, 0.95),
+    alt: lerp(climbStartAlt, climbEndAlt, 0.95)
   };
   // P1 is the intersection (control point)
   const p1_1 = {
@@ -553,16 +553,16 @@ export function createFlight(
     approachHorizDistM, approachEntryAlt, landingTargetElev, destElev, landingSamples, easeOutQuad
   );
 
-  const t_trans2Start = t_cruiseEnd + 0.95 * timing.descent;
+  const t_trans2Start = t_cruiseEnd + 0.85 * timing.descent;
   const t_trans2End = t_descentEnd + landingCumTimes[Math.floor(landingSamples * 0.2)];
 
   // P0 is at 95% of descent along the great circle
-  const p2_0_gcFrac = lerp(0.80, 1.0, 0.95);
+  const p2_0_gcFrac = lerp(0.80, 1.0, 0.85);
   const p2_0_interp = geodesic.interpolateUsingFraction(p2_0_gcFrac);
   const p2_0 = {
     lon: Cesium.Math.toDegrees(p2_0_interp.longitude),
     lat: Cesium.Math.toDegrees(p2_0_interp.latitude),
-    alt: lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(0.95))
+    alt: lerp(CRUISE_ALTITUDE, approachEntryAlt, easeInOutCubic(0.85))
   };
 
   // P1 is the intersection (control point)
