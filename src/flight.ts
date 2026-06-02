@@ -392,8 +392,8 @@ export function createFlight(
   // Build sampled position
   const position = new Cesium.SampledPositionProperty();
   position.setInterpolationOptions({
-    interpolationDegree: 3, 
-    interpolationAlgorithm: Cesium.HermitePolynomialApproximation,
+    interpolationDegree: 1,
+    interpolationAlgorithm: Cesium.LinearApproximation,
   });
 
   const elev = departure.elevation;
@@ -488,6 +488,7 @@ export function createFlight(
 
   // ── CRUISE (great circle at cruise altitude) ──────────────
   const cruiseSamples = 1000;
+  const CRUISE_CLIMB_FRAC = 1 / 30; // reach cruise altitude in ~3.3% of cruise distance
   for (let i = 0; i <= cruiseSamples; i++) {
     const frac = i / cruiseSamples;
     const elapsed = t_climbEnd + frac * timing.cruise;
@@ -498,9 +499,9 @@ export function createFlight(
     const lat = Cesium.Math.toDegrees(interp.latitude);
 
     let alt = CRUISE_ALTITUDE;
-    if (frac < 0.1) {
-      // Continue climb from 3 000 m AGL to cruise altitude in first 10% of cruise
-      alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / 0.1);
+    if (frac < CRUISE_CLIMB_FRAC) {
+      // Continue climb from 3 000 m AGL to cruise altitude early in cruise
+      alt = lerp(climbEndAlt, CRUISE_ALTITUDE, frac / CRUISE_CLIMB_FRAC);
     }
 
     addSample(elapsed, lon, lat, alt);
@@ -553,13 +554,62 @@ export function createFlight(
     buildRouteArrival(arrivalRoute, destElev, addSample, timing, t_landingEnd);
   }
 
+  function getPhase(currentTime: Cesium.JulianDate): FlightPhase {
+    const elapsed = Cesium.JulianDate.secondsDifference(currentTime, start);
+    if (elapsed < 0) return "preflight";
+    if (timing.gate > 0 && elapsed <= t_gateEnd) return "gate";
+    if (timing.taxi > 0 && elapsed <= t_taxiEnd) return "taxi";
+    if (timing.runwayHold > 0 && elapsed <= t_holdEnd) return "runway_hold";
+    if (elapsed <= t_takeoffEnd) return "takeoff";
+    if (elapsed <= t_climbEnd) return "climb";
+    if (elapsed <= t_cruiseEnd) return "cruise";
+    if (elapsed <= t_descentEnd) return "descent";
+    if (elapsed <= t_landingEnd) return "landing";
+    if (timing.rollout > 0 && elapsed <= t_rolloutEnd) return "rollout";
+    if (timing.arrivalTaxi > 0 && elapsed <= t_arrivalTaxiEnd) return "arrival_taxi";
+    if (timing.arrivalGate > 0 && elapsed < totalDuration) return "arrival_gate";
+    return "arrived";
+  }
+
+  const ORIENTATION_DT = 0.25; // seconds ahead for heading estimation
+  const FLARE_START_ALT = 80;  // meters above runway to begin pitch-up
+  const FLARE_PITCH_RAD = Cesium.Math.toRadians(4);
+
+  const orientation = new Cesium.CallbackProperty((time, result) => {
+    const curr = position.getValue(time);
+    if (!curr) return result;
+
+    const nextTime = Cesium.JulianDate.addSeconds(time, ORIENTATION_DT, new Cesium.JulianDate());
+    const next = position.getValue(nextTime) ?? curr;
+
+    const currCarto = Cesium.Cartographic.fromCartesian(curr);
+    const nextCarto = Cesium.Cartographic.fromCartesian(next);
+    const heading = computeBearingRad(
+      { lat: Cesium.Math.toDegrees(currCarto.latitude), lon: Cesium.Math.toDegrees(currCarto.longitude) },
+      { lat: Cesium.Math.toDegrees(nextCarto.latitude), lon: Cesium.Math.toDegrees(nextCarto.longitude) }
+    );
+
+    let pitch = 0;
+    const phase = getPhase(time);
+    if (phase === "landing" || phase === "rollout") {
+      const agl = currCarto.height - destElev;
+      if (agl <= FLARE_START_ALT) {
+        const t = 1 - Math.max(0, Math.min(1, agl / FLARE_START_ALT));
+        pitch = lerp(0, FLARE_PITCH_RAD, easeOutQuad(t));
+      }
+    }
+
+    const hpr = new Cesium.HeadingPitchRoll(heading, pitch, 0);
+    return Cesium.Transforms.headingPitchRollQuaternion(curr, hpr, Cesium.Ellipsoid.WGS84, result);
+  }, false);
+
   const entity = viewer.entities.add({
     name: `Flight ${departure.code} → ${destination.code}`,
     availability: new Cesium.TimeIntervalCollection([
       new Cesium.TimeInterval({ start, stop }),
     ]),
     position: position,
-    orientation: new Cesium.VelocityOrientationProperty(position),
+    orientation: orientation,
     model: {
       uri: "/plane.glb",
       minimumPixelSize: 80,
@@ -578,23 +628,6 @@ export function createFlight(
       trailTime: totalDuration,
     },
   });
-
-  function getPhase(currentTime: Cesium.JulianDate): FlightPhase {
-    const elapsed = Cesium.JulianDate.secondsDifference(currentTime, start);
-    if (elapsed < 0) return "preflight";
-    if (timing.gate > 0 && elapsed <= t_gateEnd) return "gate";
-    if (timing.taxi > 0 && elapsed <= t_taxiEnd) return "taxi";
-    if (timing.runwayHold > 0 && elapsed <= t_holdEnd) return "runway_hold";
-    if (elapsed <= t_takeoffEnd) return "takeoff";
-    if (elapsed <= t_climbEnd) return "climb";
-    if (elapsed <= t_cruiseEnd) return "cruise";
-    if (elapsed <= t_descentEnd) return "descent";
-    if (elapsed <= t_landingEnd) return "landing";
-    if (timing.rollout > 0 && elapsed <= t_rolloutEnd) return "rollout";
-    if (timing.arrivalTaxi > 0 && elapsed <= t_arrivalTaxiEnd) return "arrival_taxi";
-    if (timing.arrivalGate > 0 && elapsed < totalDuration) return "arrival_gate";
-    return "arrived";
-  }
 
   // Departure camera info
   let departureCamera: FlightResult["departureCamera"] = null;
@@ -1006,11 +1039,15 @@ function buildApproachWithTurn(
   let currentHeading = initialHeadingRad;
   let currentAlt = approachEntryAlt;
   const maxStep = MAX_TURN_RATE_RAD * SIM_DT;
+  const totalApproachDist = Math.max(
+    1,
+    haversineDistMeters(approachEntryLat, approachEntryLon, touchdownLat, touchdownLon)
+  );
 
   addSample(t_descentEnd, currentLon, currentLat, currentAlt);
 
   let elapsed = 0;
-  while (currentAlt > destElev + 0.5) {
+  while (true) {
     elapsed += SIM_DT;
 
     // Turn toward touchdown point (limited by maxTurnRate)
@@ -1022,17 +1059,27 @@ function buildApproachWithTurn(
 
     // Advance position at altitude-dependent approach speed
     const speed = getSpeedForAltitude(currentAlt, destElev);
+    const distToTarget = haversineDistMeters(currentLat, currentLon, touchdownLat, touchdownLon);
+    if (distToTarget <= speed * SIM_DT) {
+      currentLon = touchdownLon;
+      currentLat = touchdownLat;
+      currentAlt = destElev;
+      addSample(t_descentEnd + elapsed, currentLon, currentLat, currentAlt);
+      break;
+    }
+
     const next = moveWithHeading(currentLon, currentLat, currentHeading, speed * SIM_DT);
     currentLon = next.lon;
     currentLat = next.lat;
 
-    // Altitude: easeOutQuad in time — consistent with planFlight() landing estimate
-    const altFrac = Math.min(elapsed / landingDuration, 1.0);
-    currentAlt = lerp(approachEntryAlt, destElev, easeOutQuad(altFrac));
+    // Altitude: easeOutQuad by distance-to-touchdown to avoid early ground contact
+    const distToTargetAfter = haversineDistMeters(currentLat, currentLon, touchdownLat, touchdownLon);
+    const distFrac = Math.min(1.0, Math.max(0.0, 1 - distToTargetAfter / totalApproachDist));
+    currentAlt = lerp(approachEntryAlt, destElev, easeOutQuad(distFrac));
 
     addSample(t_descentEnd + elapsed, currentLon, currentLat, currentAlt);
 
-    if (elapsed > landingDuration * 2) break; // safety guard
+    if (elapsed > landingDuration * 3) break; // safety guard
   }
 
   return {
